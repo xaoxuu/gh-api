@@ -3,7 +3,8 @@ import { type Config, hash, HttpError } from './config.js';
 import { errorResponse } from './errors.js';
 import { paginationRoute, parseRoute, redirectRoute, type Route, routeUrl } from './routes.js';
 
-interface Entry { body: string; checkedAt: number; etag?: string; link?: string; status?: 200 | 204 }
+type AuthMode = 'token' | 'anonymous';
+interface Entry { auth?: AuthMode; body: string; checkedAt: number; etag?: string; link?: string; status?: 200 | 204 }
 interface Result { entry: Entry; state: 'HIT' | 'MISS' | 'REVALIDATED' | 'STALE'; retryAfter?: number }
 interface Dependencies {
   cache: Cache;
@@ -20,8 +21,10 @@ export function createProxy(config: Config, dependencies: Dependencies) {
   const inFlight = new Map<string, Promise<Result>>();
   let queue: Promise<unknown> = Promise.resolve();
   let queued = 0;
-  let cooldown = 0;
-  let consecutiveLimits = 0;
+  const cooldowns = { token: 0, anonymous: 0 };
+  const limits = { token: 0, anonymous: 0 };
+  const cooldownKeys = { token: config.cooldownKey, anonymous: `${config.cooldownKey.split(':cooldown:')[0]}:cooldown:anonymous` };
+  const fallbackKey = (repository: string) => `${config.prefix}:anonymous:${repository}`;
   const ttlFor = (route: Route) => route.kind === 'rate-limit' ? Math.min(5, config.ttl) : config.ttl;
   const keyOf = (route: Route) => `${config.prefix}:${hash(routeUrl(route))}`;
 
@@ -41,9 +44,9 @@ export function createProxy(config: Config, dependencies: Dependencies) {
   }
   const age = (entry: Entry) => Math.max(0, (now() - entry.checkedAt) / 1000);
 
-  async function checkCooldown() {
-    cooldown = Math.max(cooldown, (await read<number>(config.cooldownKey)) ?? 0);
-    if (cooldown > now()) throw new HttpError(429, 'GitHub requests are cooling down', Math.ceil((cooldown - now()) / 1000));
+  async function checkCooldown(auth: AuthMode) {
+    cooldowns[auth] = Math.max(cooldowns[auth], (await read<number>(cooldownKeys[auth])) ?? 0);
+    if (cooldowns[auth] > now()) throw new HttpError(429, 'GitHub requests are cooling down', Math.ceil((cooldowns[auth] - now()) / 1000));
   }
 
   async function serial<T>(work: () => Promise<T>): Promise<T> {
@@ -97,25 +100,38 @@ export function createProxy(config: Config, dependencies: Dependencies) {
 
   async function upstream(initial: Route, old: Entry | undefined, signal: AbortSignal): Promise<Entry> {
     let route = initial;
-    for (let redirects = 0; redirects <= 3; redirects++) {
-      await checkCooldown();
+    let forceAnonymous = false;
+    let fallbackAttempted = false;
+    async function accept(entry: Entry, auth: AuthMode): Promise<Entry> {
+      limits[auth] = 0;
+      if (auth === 'anonymous' && fallbackAttempted && route.repository) {
+        await write(fallbackKey(route.repository), now() + 300_000, 300);
+      }
+      return { ...entry, auth };
+    }
+    for (let redirects = 0; redirects <= 3;) {
       if (route.repository && route.kind !== 'repo') {
         await publicRepository(route.repository, signal);
-        await checkCooldown();
       }
+      const preferAnonymous = route.repository && (await read<number>(fallbackKey(route.repository)) ?? 0) > now();
+      const auth: AuthMode = forceAnonymous || preferAnonymous ? 'anonymous' : 'token';
+      await checkCooldown(auth);
       const headers: Record<string, string> = {
-        Authorization: `Bearer ${config.token}`, Accept: 'application/vnd.github+json',
+        Accept: 'application/vnd.github+json',
         'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'gh-api',
       };
+      if (auth === 'token') headers.Authorization = `Bearer ${config.token}`;
+      const canRevalidate = old && redirects === 0 && (old.auth ?? 'token') === auth;
       // An ETag belongs to a specific resource, never a different redirect target.
-      if (old?.etag && redirects === 0) headers['If-None-Match'] = old.etag;
-      log({ event: 'github_request', path: route.path });
+      if (canRevalidate && old.etag) headers['If-None-Match'] = old.etag;
+      log({ event: 'github_request', path: route.path, auth });
       const response = await fetcher(routeUrl(route), { headers, redirect: 'manual', signal });
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         await response.body?.cancel();
         const location = response.headers.get('location');
         if (!location || redirects === 3) throw new HttpError(502, 'Unsupported upstream redirect');
         route = redirectRoute(location, route, config);
+        redirects++;
         continue;
       }
       const text = await bodyText(response);
@@ -127,30 +143,40 @@ export function createProxy(config: Config, dependencies: Dependencies) {
         /rate limit|abuse detection/i.test(data?.message ?? '')
       ));
       if (limited) {
-        consecutiveLimits++;
+        limits[auth]++;
         const retry = response.headers.get('retry-after');
         const retryAt = retry ? (/^\d+$/.test(retry) ? now() + Number(retry) * 1000 : Date.parse(retry)) : 0;
         const resetAt = response.headers.get('x-ratelimit-remaining') === '0' ? Number(response.headers.get('x-ratelimit-reset')) * 1000 : 0;
         const requiredAt = Math.max(Number.isFinite(retryAt) ? retryAt : 0, Number.isFinite(resetAt) ? resetAt : 0);
-        cooldown = Math.max(cooldown, requiredAt > now() ? requiredAt : now() + Math.min(3600, 60 * 2 ** Math.min(consecutiveLimits - 1, 6)) * 1000);
-        const seconds = Math.max(1, Math.ceil((cooldown - now()) / 1000));
-        await write(config.cooldownKey, cooldown, seconds);
-        log({ event: 'github_rate_limited', retryAfter: seconds });
+        cooldowns[auth] = Math.max(cooldowns[auth], requiredAt > now() ? requiredAt : now() + Math.min(3600, 60 * 2 ** Math.min(limits[auth] - 1, 6)) * 1000);
+        const seconds = Math.max(1, Math.ceil((cooldowns[auth] - now()) / 1000));
+        await write(cooldownKeys[auth], cooldowns[auth], seconds);
+        log({ event: 'github_rate_limited', retryAfter: seconds, auth });
         throw new HttpError(429, 'GitHub rate limit reached', seconds);
       }
+      // Only the observed PAT lifetime policy is eligible. Never downgrade generic
+      // authorization, SSO/IP restrictions, invalid tokens, or rate limits.
+      if (auth === 'token' && !fallbackAttempted && route.repository && response.status === 403 &&
+          typeof data?.message === 'string' &&
+          /^The '[^']+' organization forbids access via (?:a )?fine-grained personal access tokens? if the token's lifetime is greater than \d+ days\./i.test(data.message)) {
+        fallbackAttempted = true;
+        forceAnonymous = true;
+        log({ event: 'github_anonymous_fallback', path: route.path, reason: 'token_lifetime_policy' });
+        continue;
+      }
+      if (fallbackAttempted) log({ event: 'github_anonymous_result', path: route.path, status: response.status });
       if (response.status >= 500) throw new HttpError(502, 'GitHub is temporarily unavailable');
       if ([200, 204, 304].includes(response.status) && response.headers.get('x-ratelimit-remaining') === '0') {
         const resetAt = Number(response.headers.get('x-ratelimit-reset')) * 1000;
         if (Number.isFinite(resetAt) && resetAt > now()) {
-          cooldown = Math.max(cooldown, resetAt);
-          await write(config.cooldownKey, cooldown, Math.ceil((cooldown - now()) / 1000));
+          cooldowns[auth] = Math.max(cooldowns[auth], resetAt);
+          await write(cooldownKeys[auth], cooldowns[auth], Math.ceil((cooldowns[auth] - now()) / 1000));
         }
       }
-      if (response.status === 304 && old && redirects === 0) {
-        consecutiveLimits = 0;
-        return { ...old, checkedAt: now(), etag: response.headers.get('etag') ?? old.etag };
+      if (response.status === 304 && canRevalidate) {
+        return accept({ ...old, checkedAt: now(), etag: response.headers.get('etag') ?? old.etag }, auth);
       }
-      if (response.status === 204 && route.kind === 'contributors') return { body: '', checkedAt: now(), status: 204 };
+      if (response.status === 204 && route.kind === 'contributors') return accept({ body: '', checkedAt: now(), status: 204 }, auth);
       if (response.status !== 200) {
         // Do not relay upstream error bodies, which can contain privileged details.
         throw new HttpError([401, 403, 404, 422].includes(response.status) ? response.status : 502, `GitHub request failed (${response.status})`, undefined, 'UPSTREAM_REQUEST_FAILED');
@@ -158,8 +184,7 @@ export function createProxy(config: Config, dependencies: Dependencies) {
       if (data === undefined || data === null) throw new HttpError(502, 'Invalid GitHub JSON response');
       if (route.kind === 'repo' && data?.private !== false) throw new HttpError(403, 'Only public repositories are supported');
       if (['user-repos', 'org-repos', 'user-starred', 'user-subscriptions', 'forks'].includes(route.kind) && (!Array.isArray(data) || data.some(repo => repo.private !== false))) throw new HttpError(403, 'Only public repositories are supported');
-      consecutiveLimits = 0;
-      return { body: text, checkedAt: now(), etag: response.headers.get('etag') ?? undefined, link: response.headers.get('link') ?? undefined };
+      return accept({ body: text, checkedAt: now(), etag: response.headers.get('etag') ?? undefined, link: response.headers.get('link') ?? undefined }, auth);
     }
     throw new HttpError(502, 'Too many redirects');
   }

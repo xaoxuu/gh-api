@@ -408,3 +408,107 @@ test('rate limit and cooldown expose retry seconds in the same error envelope', 
   }
   assert.equal(f.calls.length, 1);
 });
+
+const lifetimePolicy = "The 'alice' organization forbids access via a fine-grained personal access tokens if the token's lifetime is greater than 366 days. Please adjust your token's lifetime at https://github.com/settings/personal-access-tokens/123";
+const sentAuth = (call: { init?: RequestInit }) => new Headers(call.init?.headers).has('authorization');
+
+test('PAT lifetime refusal falls back anonymously for visibility and content, caches and expires preference', async () => {
+  const f = fixture([json({ message: lifetimePolicy }, 403), json({ private: false }), json([{ title: 'public' }]), json({ private: false }), json([]), json({ private: false }), json([])]);
+  const path = '/repos/alice/repo/issues';
+  const first = await f.handler(request(path));
+  assert.equal(first.status, 200);
+  assert.deepEqual(await first.json(), [{ title: 'public' }]);
+  assert.deepEqual(f.calls.map(sentAuth), [true, false, false]);
+  assert.equal((await f.handler(request(path))).headers.get('x-proxy-cache'), 'HIT');
+  f.advance(31);
+  assert.equal((await f.handler(request(path))).status, 200);
+  assert.deepEqual(f.calls.slice(3).map(sentAuth), [false, false]);
+  f.advance(300);
+  assert.equal((await f.handler(request(path))).status, 200);
+  assert.deepEqual(f.calls.slice(5).map(sentAuth), [true, true]);
+  assert.match(JSON.stringify(f.logs), /github_anonymous_fallback/);
+  assert.doesNotMatch(JSON.stringify(f.logs), /personal-access-tokens\/123|server-secret/);
+});
+
+test('anonymous preference is shared per repository and isolated by token', async () => {
+  const f = fixture([json({ message: lifetimePolicy }, 403), json({ private: false })]);
+  await f.handler(request('/repos/alice/repo'));
+  const another = fixture([json([]), json({ private: false })], {}, f.cache);
+  assert.equal((await another.handler(request('/repos/alice/repo/issues'))).status, 200);
+  assert.equal((await another.handler(request('/repos/alice/other'))).status, 200);
+  assert.deepEqual(another.calls.map(sentAuth), [false, true]);
+  const rotated = fixture([json({ private: false })], { GITHUB_TOKEN: 'rotated' }, f.cache);
+  assert.equal((await rotated.handler(request('/repos/alice/repo'))).status, 200);
+  assert.equal(sentAuth(rotated.calls[0]), true);
+});
+
+test('only explicit repository lifetime-policy 403 can downgrade', async () => {
+  for (const [status, message, headers] of [
+    [401, lifetimePolicy, {}], [404, lifetimePolicy, {}], [403, 'Resource not accessible by personal access token', {}],
+    [403, 'Organization requires SAML SSO', {}], [403, 'IP address is not allowed', {}],
+    [403, lifetimePolicy, { 'retry-after': '60' }], [403, lifetimePolicy, { 'x-ratelimit-remaining': '0' }],
+    [429, lifetimePolicy, {}], [403, 'secondary rate limit', {}],
+  ] as Array<[number, string, Record<string, string>]>) {
+    const f = fixture([json({ message }, status, headers)]);
+    assert.notEqual((await f.handler(request('/repos/alice/repo'))).status, 200);
+    assert.equal(f.calls.length, 1);
+  }
+  for (const path of ['/rate_limit', '/users/alice', '/orgs/alice']) {
+    const f = fixture([json({ message: lifetimePolicy }, 403)]);
+    assert.equal((await f.handler(request(path))).status, 403);
+    assert.equal(f.calls.length, 1);
+  }
+});
+
+test('failed anonymous retry never loops or remembers preference and preserves visibility guard', async () => {
+  for (const reply of [json({ message: lifetimePolicy }, 403), json({}, 404), json({ private: true })]) {
+    const f = fixture([json({ message: lifetimePolicy }, 403), reply, json({ private: false })]);
+    assert.notEqual((await f.handler(request('/repos/alice/repo/issues'))).status, 200);
+    assert.equal(f.calls.length, 2);
+    assert.equal((await f.handler(request('/repos/alice/repo'))).status, 200);
+    assert.equal(sentAuth(f.calls[2]), true);
+  }
+});
+
+test('anonymous quota cooldown is shared but does not block token-backed repositories', async () => {
+  const f = fixture([json({ message: lifetimePolicy }, 403), json({}, 429, { 'retry-after': '60' }), json({ private: false })]);
+  assert.equal((await f.handler(request('/repos/alice/repo'))).status, 429);
+  assert.equal((await f.handler(request('/repos/alice/other'))).status, 200);
+  const another = fixture([json({ message: lifetimePolicy }, 403)], {}, f.cache);
+  assert.equal((await another.handler(request('/repos/alice/repo'))).status, 429);
+  assert.equal(another.calls.length, 1);
+});
+
+test('switching authentication drops ETag, while anonymous revalidation retains it', async () => {
+  const f = fixture([json({ private: false }, 200, { etag: '"token"' }), json({ message: lifetimePolicy }, 403), json({ private: false }, 200, { etag: '"anon"' }), new Response(null, { status: 304 })]);
+  await f.handler(request('/repos/alice/repo')); f.advance(31);
+  assert.equal((await f.handler(request('/repos/alice/repo'))).status, 200);
+  assert.equal(new Headers(f.calls[1].init?.headers).get('if-none-match'), '"token"');
+  assert.equal(new Headers(f.calls[2].init?.headers).get('if-none-match'), null);
+  f.advance(31);
+  assert.equal((await f.handler(request('/repos/alice/repo'))).status, 200);
+  assert.equal(new Headers(f.calls[3].init?.headers).get('if-none-match'), '"anon"');
+});
+
+test('anonymous fallback redirects remain anonymous and enforce destination allowlist', async () => {
+  const f = fixture([json({ message: lifetimePolicy }, 403), new Response(null, { status: 301, headers: { location: '/repos/vercel/next.js' } }), json({ private: false })]);
+  assert.equal((await f.handler(request('/repos/alice/repo'))).status, 200);
+  assert.deepEqual(f.calls.map(sentAuth), [true, false, false]);
+  const denied = fixture([json({ message: lifetimePolicy }, 403), new Response(null, { status: 301, headers: { location: 'https://evil.test/repos/alice/repo' } })]);
+  assert.equal((await denied.handler(request('/repos/alice/repo'))).status, 502);
+  assert.equal(denied.calls.length, 2);
+});
+
+test('content-only policy refusal supports 204 and shares preference with other subresources', async () => {
+  const f = fixture([json({ private: false }), json({ message: lifetimePolicy }, 403), new Response(null, { status: 204 }), json([])]);
+  assert.equal((await f.handler(request('/repos/alice/repo/contributors'))).status, 204);
+  assert.equal((await f.handler(request('/repos/alice/repo/issues'))).status, 200);
+  assert.deepEqual(f.calls.map(sentAuth), [true, true, false, false]);
+});
+
+test('anonymous metadata exhausting quota prevents content fetch but leaves token quota alone', async () => {
+  const f = fixture([json({ message: lifetimePolicy }, 403), json({ private: false }, 200, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '1800000060' }), json({ private: false })]);
+  assert.equal((await f.handler(request('/repos/alice/repo/issues'))).status, 429);
+  assert.equal(f.calls.length, 2);
+  assert.equal((await f.handler(request('/repos/alice/other'))).status, 200);
+});
