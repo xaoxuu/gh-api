@@ -251,7 +251,7 @@ test('new repository collections reject private data even with an overprivileged
 test('methods and CORS are checked even when a cache entry exists', async () => {
   const f = fixture([json({ n: 1 })], { CORS_ORIGINS: 'https://site.test' });
   await f.handler(request());
-  for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'HEAD']) assert.equal((await f.handler(request(undefined, { method }))).status, 405);
+  for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) assert.equal((await f.handler(request(undefined, { method }))).status, 405);
   assert.equal((await f.handler(request(undefined, { headers: { Origin: 'https://evil.test' } }))).status, 403);
   const good = await f.handler(request(undefined, { headers: { Origin: 'https://site.test' } }));
   assert.equal(good.headers.get('vary'), 'Origin'); assert.equal(good.headers.get('access-control-allow-origin'), 'https://site.test');
@@ -511,4 +511,70 @@ test('anonymous metadata exhausting quota prevents content fetch but leaves toke
   assert.equal((await f.handler(request('/repos/alice/repo/issues'))).status, 429);
   assert.equal(f.calls.length, 2);
   assert.equal((await f.handler(request('/repos/alice/other'))).status, 200);
+});
+
+test('contributors compatibility shares cache while retaining the public repository guard', async () => {
+  const data = [{ login: 'alice', contributions: 100 }, { login: 'bob', contributions: 1 }];
+  const f = fixture([json({ private: false }), json(data)]);
+  const path = '/repos/alice/repo/contributors';
+  for (const query of ['per_page=100&direction=asc&_=1', 'direction=desc&per_page=0100&timestamp=2', 'per_page=100']) {
+    const response = await f.handler(request(`${path}?${query}`));
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), data);
+  }
+  assert.deepEqual(f.calls.map(c => c.url), ['https://api.github.com/repos/alice/repo', `https://api.github.com${path}?per_page=100`]);
+  const denied = fixture([json({ private: true })]);
+  assert.equal((await denied.handler(request(`${path}?per_page=100&direction=asc`))).status, 403);
+  assert.equal(denied.calls.length, 1);
+});
+
+test('HEAD shares GET cache and retains visibility, allowlist and error protections', async () => {
+  const f = fixture([json({ private: false }), json([])]);
+  const head = await f.handler(request('/repos/alice/repo/issues', { method: 'HEAD' }));
+  assert.equal(head.status, 200);
+  assert.equal(await head.text(), '');
+  const get = await f.handler(request('/repos/alice/repo/issues'));
+  assert.equal(get.headers.get('x-proxy-cache'), 'HIT');
+  assert.deepEqual(await get.json(), []);
+  assert.equal(f.calls.length, 2);
+  const denied = fixture([json({ private: true })]);
+  const response = await denied.handler(request('/repos/alice/private/issues', { method: 'HEAD' }));
+  assert.equal(response.status, 403);
+  assert.equal(await response.text(), '');
+  assert.equal(denied.calls.length, 1);
+  const forbidden = await f.handler(request('/repos/bob/repo', { method: 'HEAD' }));
+  assert.equal(forbidden.status, 403);
+  assert.equal(await forbidden.text(), '');
+});
+
+test('upstream client errors preserve status without leaking details or serving stale data', async () => {
+  for (const status of [400, 408, 409, 410, 415, 422]) {
+    const f = fixture([json({ old: true }), json({ message: 'sensitive upstream detail' }, status)]);
+    await f.handler(request());
+    f.advance(31);
+    const response = await f.handler(request());
+    assert.equal(response.status, status);
+    assert.equal(response.headers.get('x-proxy-cache'), null);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    const body = await response.json();
+    assert.equal(body.code, 'UPSTREAM_REQUEST_FAILED');
+    assert.doesNotMatch(JSON.stringify(body), /sensitive|old/);
+  }
+});
+
+test('common CORS headers are accepted for HEAD but never forwarded upstream', async () => {
+  const f = fixture([json({ ok: true })]);
+  const preflight = await f.handler(request('/users/alice', { method: 'OPTIONS', headers: {
+    'Access-Control-Request-Method': 'HEAD',
+    'Access-Control-Request-Headers': 'Accept, Content-Type, X-Requested-With',
+  } }));
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get('access-control-allow-methods'), 'GET, HEAD, OPTIONS');
+  assert.equal(f.calls.length, 0);
+  const denied = await f.handler(request('/users/alice', { method: 'OPTIONS', headers: { 'Access-Control-Request-Headers': 'Authorization' } }));
+  assert.equal(denied.status, 400);
+  await f.handler(request('/users/alice', { headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'fetch' } }));
+  const headers = new Headers(f.calls[0].init?.headers);
+  assert.equal(headers.get('content-type'), null);
+  assert.equal(headers.get('x-requested-with'), null);
 });

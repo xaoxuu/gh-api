@@ -43,7 +43,7 @@ console.log(issues, response.headers.get('X-Proxy-Cache'));
 
 ## 支持的接口
 
-直接访问 `/` 返回 GitHub API 入口 JSON，保留 GitHub 原始链接。`/rate_limit` 返回服务端 Token 的额度信息，最多缓存 5 秒，不使用过期数据兜底；冷却期间遵守重试时间。这两个入口无需匹配 owner/repo 白名单，不接受查询参数。入口 JSON 中列出的链接不代表代理开放了所有接口。
+直接访问 `/` 返回 GitHub API 入口 JSON，保留 GitHub 原始链接。`/rate_limit` 返回服务端 Token 的额度信息，最多缓存 5 秒，不使用过期数据兜底；冷却期间遵守重试时间。这两个入口无需匹配 owner/repo 白名单，仅接受并移除 `_`、`timestamp`，其他查询参数仍拒绝。入口 JSON 中列出的链接不代表代理开放了所有接口。
 
 | GitHub 路径 | 支持查询参数 |
 | --- | --- |
@@ -54,7 +54,7 @@ console.log(issues, response.headers.get('X-Proxy-Cache'));
 | `/orgs/:owner` | 无 |
 | `/orgs/:owner/repos` | `page`, `per_page`, `type`, `sort`, `direction` |
 | `/repos/:owner/:repo` | 无 |
-| `/repos/:owner/:repo/issues` | `page`, `per_page`, `state`, `labels`, `sort`, `direction`, `since`, `creator`, `mentioned`, `assignee`, `milestone` |
+| `/repos/:owner/:repo/issues` | `page`, `per_page`, `state`, `labels`, `sort`, `direction`, `since`, `creator`, `mentioned`, `assignee`, `milestone`, `type`, `issue_field_values` |
 | `/repos/:owner/:repo/issues/:number` | 无 |
 | `/repos/:owner/:repo/issues/:number/comments` | `page`, `per_page`, `since` |
 | `/repos/:owner/:repo/issues/comments` | `page`, `per_page`, `since`, `sort`, `direction` |
@@ -62,21 +62,26 @@ console.log(issues, response.headers.get('X-Proxy-Cache'));
 | `/repos/:owner/:repo/releases` | `page`, `per_page` |
 | `/repos/:owner/:repo/tags` | `page`, `per_page` |
 | `/repos/:owner/:repo/releases/latest`、`/releases/:id` | 无 |
-| `/repos/:owner/:repo/contributors` | `page`, `per_page`, `anon` |
+| `/repos/:owner/:repo/contributors` | `page`, `per_page`, `anon`；兼容 `direction=asc/desc`（忽略） |
 | `/repos/:owner/:repo/stargazers`、`/repos/:owner/:repo/subscribers` | `page`, `per_page` |
 | `/repos/:owner/:repo/forks` | `page`, `per_page`, `sort` |
 | `/repos/:owner/:repo/branches` | `page`, `per_page`, `protected` |
 | `/repos/:owner/:repo/commits` | `page`, `per_page`, `sha`, `path`, `author`, `committer`, `since`, `until` |
-| `/repos/:owner/:repo/languages`、`/repos/:owner/:repo/topics` | 无 |
+| `/repos/:owner/:repo/languages` | 无 |
+| `/repos/:owner/:repo/topics` | `page`, `per_page` |
 | `/repos/:owner/:repo/labels`、`/repos/:owner/:repo/issues/:number/labels` | `page`, `per_page` |
 | `/repos/:owner/:repo/milestones` | `page`, `per_page`, `state`, `sort`, `direction` |
 | `/repos/:owner/:repo/milestones/:number` | 无 |
 | `/repos/:owner/:repo/pulls` | `page`, `per_page`, `state`, `head`, `base`, `sort`, `direction` |
 | `/repos/:owner/:repo/pulls/:number` | 无 |
 
-仅接受 `GET` 和 `OPTIONS`。`per_page` 为 1–100，`page` 为 1–10000；`since` 和 `until` 使用 UTC 格式 `YYYY-MM-DDTHH:mm:ssZ`。其他枚举遵循对应 GitHub 接口；不接受重复参数、随机缓存破坏参数、编码路径段或任意上游 URL。搜索、文件内容、GraphQL、写接口和当前登录身份 `/user` 不在支持范围内。GitHub Issues 列表可能包含 Pull Request，这是 GitHub 原始行为。
+支持 `GET`、`HEAD` 和 `OPTIONS`。`HEAD` 复用 GET 的公开性检查、授权和缓存逻辑，仅省略响应正文；冷缓存时仍需要 GET 回源。CORS 预检允许 `Accept`、`Content-Type`、`X-Requested-With`，不会把这些客户端请求头原样转发给 GitHub。`per_page` 为 1–100，`page` 为 1–10000，允许前导零并规范化为普通整数；`since` 和 `until` 使用 UTC 格式 `YYYY-MM-DDTHH:mm:ssZ`。其他枚举遵循对应 GitHub 接口；所有入口统一移除 `_`、`timestamp`，它们不参与 Runtime Cache 键；其他未知参数继续拒绝。不接受重复参数、编码路径段或任意上游 URL。搜索、文件内容、GraphQL、写接口和当前登录身份 `/user` 不在支持范围内。GitHub Issues 列表可能包含 Pull Request，这是 GitHub 原始行为。
 
 owner 可为用户或组织名称。`/users` 和 `/orgs` 下的接口需要 owner 级白名单授权。组织仓库列表默认只查询公开仓库，`type` 可选 `public`、`forks`、`sources`。Stargazers 使用 GitHub 默认的用户列表格式；Watchers 对应 `/subscribers`。Branches 和 Commits 提供列表接口。
+
+贡献者接口固定按贡献数降序返回，兼容的 `direction=asc/desc` 校验后移除，不改变排序，与不带此参数的请求共用 Runtime Cache。Forks 的 `sort` 支持 `newest`、`oldest`、`stargazers`、`watchers`。Issues 的 `type` 接受类型名称、`*` 或 `none`，`issue_field_values` 接受 `priority:Urgent` 等字段筛选（需仓库启用对应字段）；这些规则不会放宽组织仓库列表的 `type` 限制。
+
+参数规范化仅合并 Runtime Cache 和回源请求；不同原始 URL 的 Vercel CDN 缓存仍可能分开。公开性检查、资源与端点白名单、输入长度限制及限流策略继续生效。
 
 ## 环境变量
 
@@ -107,7 +112,7 @@ CORS 是浏览器跨域策略，不是身份认证；没有 Origin 的服务端�
 5. 确认限流后共享冷却截止时间并保留实例内状态；遵守 `Retry-After` 和主额度重置时间，无有效时间时至少等待 60 秒，连续二级限流逐次延长等待。冷却期间不主动重试。
 6. 仓库请求遇到 GitHub 明确返回“PAT 有效期超过组织上限”的 `403` 时，移除 Authorization 匿名重试一次（重定向仍受原有白名单和次数限制）。仓库公开性检查和内容请求均支持此兜底；匿名结果仍须通过公开性校验。成功后按仓库记住匿名模式 5 分钟，到期后的回源重新优先使用 Token；更换 Token 会隔离旧的降级记录。切换认证方式不复用原 ETag，成功数据照常缓存。
 7. 匿名兜底不适用于普通权限拒绝、SSO/IP 限制、无效 Token、限流或 `/rate_limit`。Token 与匿名请求分别记录冷却时间；匿名额度通常仅每出口 IP 每小时 60 次，冷却状态在当前项目和部署环境内共享，不保证跨项目或跨出口的全局限流。日志只记录 `github_anonymous_fallback` 的固定原因以及 `github_anonymous_result` 的状态码，不记录 Token 或 GitHub 原始错误正文。
-8. `429`、上游 `5xx`、网络失败或队列过载时，尽可能返回允许年龄内的旧数据，且响应 `no-store`。没有旧数据则返回 `429`、`502` 或 `503`。普通 `401/403/404` 会移除对应缓存，直接返回错误；不转发上游错误正文。
+8. `429`、上游 `5xx`、网络失败或队列过载时，尽可能返回允许年龄内的旧数据，且响应 `no-store`。没有旧数据则返回 `429`、`502` 或 `503`。普通 `401/403/404` 会移除对应缓存，直接返回错误；其他上游 `4xx` 也保留原状态，均不使用旧数据兜底，不转发上游错误正文。
 
 响应头：`X-Proxy-Cache` 为 `MISS`、`HIT`、`REVALIDATED` 或 `STALE`；`X-Proxy-Checked-At` 为成功校验时间，`Retry-After` 为可重试秒数。CDN 命中时这些头是生成缓存时的快照，应结合 Vercel 的 `x-vercel-cache` 和 `Age` 判断实际 CDN 命中。
 
@@ -138,7 +143,7 @@ GitHub 普通认证主额度通常为每小时 5000 次；认证条件请求的 
 | `FORBIDDEN` | 白名单、Origin 或公开仓库限制拒绝访问 |
 | `UNSUPPORTED_ENDPOINT` | 不支持的接口 |
 | `METHOD_NOT_ALLOWED` | 不支持的 HTTP 方法 |
-| `UPSTREAM_REQUEST_FAILED` | GitHub 请求失败，结合 `status` 区分 401/403/404/422；其他异常状态映射为 502 |
+| `UPSTREAM_REQUEST_FAILED` | GitHub 请求失败，普通 `4xx` 保留原状态（限流单独处理）；其他异常状态映射为 502 |
 | `RATE_LIMITED` | GitHub 限流或冷却中 |
 | `UPSTREAM_ERROR` | GitHub 服务异常、网络/超时、响应格式或大小异常 |
 | `SERVICE_UNAVAILABLE` | 上游队列已满或等待超时 |
@@ -169,7 +174,7 @@ GitHub 普通认证主额度通常为每小时 5000 次；认证条件请求的 
 
 ```sh
 curl -i 'https://YOUR-PROJECT.vercel.app/repos/vercel/next.js'
-# 再次请求相同 URL，检查 x-vercel-cache: HIT；不要使用 curl -I（HEAD 不支持）
+# 再次请求相同 URL，检查 x-vercel-cache: HIT；也可使用 curl -I 验证 HEAD 响应
 curl -i 'https://YOUR-PROJECT.vercel.app/repos/vercel/next.js'
 curl -i -H 'Origin: https://example.com' 'https://YOUR-PROJECT.vercel.app/repos/vercel/next.js/issues?per_page=1'
 ```

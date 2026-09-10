@@ -78,3 +78,31 @@ test('root profile and paginated requests forward only supported explicit query 
   });
   assert.equal(calls.length, 2);
 });
+
+test('supported filters expand without relaxing endpoint or public-only parameter rules', () => {
+  const config = readConfig({ GITHUB_TOKEN: 'test-token', GITHUB_ALLOWLIST: 'xaoxuu' });
+  for (const [path, query] of [
+    ['/repos/xaoxuu/repo/forks', 'sort=watchers'],
+    ['/repos/xaoxuu/repo/topics', 'page=1&per_page=20'],
+    ['/repos/xaoxuu/repo/issues', 'issue_field_values=priority%3AUrgent&type=Bug'],
+  ]) assert.equal(parseRoute(`${path}?${query}`, config).query, query);
+  for (const path of ['/orgs/xaoxuu/repos?type=private', '/repos/xaoxuu/repo/issues?unknown=1', '/repos/xaoxuu/repo/hooks', '/repos/xaoxuu/repo/contributors?direction=up']) {
+    assert.throws(() => parseRoute(path, config), path);
+  }
+  const route = parseRoute('/repos/xaoxuu/repo/issues?type=Bug', config);
+  assert.equal(paginationRoute('https://api.github.com/repositories/123/issues?type=Bug&page=02', route, config).query, 'page=2&type=Bug');
+});
+
+test('noise is removed consistently and pagination canonicalizes without weakening input bounds', () => {
+  const config = readConfig({ GITHUB_TOKEN: 'test-token', GITHUB_ALLOWLIST: 'xaoxuu' });
+  for (const path of ['/', '/rate_limit', '/users/xaoxuu']) {
+    assert.deepEqual(parseRoute(`${path}?_=1&timestamp=2`, config), parseRoute(path, config));
+    for (const query of ['_=1&_=2', 'timestamp=%00', 'unknown=1', 'token=secret']) {
+      assert.throws(() => parseRoute(`${path}?${query}`, config), query);
+    }
+  }
+  assert.equal(parseRoute('/users/xaoxuu/repos?page=01&per_page=020&_=1', config).query, 'page=1&per_page=20');
+  for (const query of ['page=00', 'page=-1', 'page=1.0', 'per_page=0101', 'page=10001', 'page=1&page=01']) {
+    assert.throws(() => parseRoute(`/users/xaoxuu/repos?${query}`, config), query);
+  }
+});

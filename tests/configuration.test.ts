@@ -89,3 +89,20 @@ test('CORS normalizes trailing slashes, casing and default ports without broaden
     assert.throws(() => readConfig({ GITHUB_TOKEN: 'test-token', CORS_ORIGINS: value }), ConfigurationError);
   }
 });
+
+test('HEAD configuration errors have no response body', async () => {
+  const previous = process.env.GITHUB_TOKEN;
+  const originalLog = console.error;
+  try {
+    delete process.env.GITHUB_TOKEN;
+    console.error = () => {};
+    const response = await api.fetch(new Request('https://proxy.test/', { method: 'HEAD' }));
+    assert.equal(response.status, 500);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal(await response.text(), '');
+  } finally {
+    if (previous === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = previous;
+    console.error = originalLog;
+  }
+});

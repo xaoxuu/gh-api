@@ -10,7 +10,8 @@ export default {
     catch (error) {
       const details = error instanceof ConfigurationError ? { field: error.field, reason: error.message } : null;
       console.error(JSON.stringify({ event: 'configuration_error', ...details }));
-      return errorResponse(new HttpError(500, 'Invalid server configuration', undefined, 'INVALID_CONFIGURATION'), undefined, details);
+      const response = errorResponse(new HttpError(500, 'Invalid server configuration', undefined, 'INVALID_CONFIGURATION'), undefined, details);
+      return request.method === 'HEAD' ? new Response(null, { status: response.status, headers: response.headers }) : response;
     }
     return handler(request);
   },

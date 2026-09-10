@@ -179,7 +179,7 @@ export function createProxy(config: Config, dependencies: Dependencies) {
       if (response.status === 204 && route.kind === 'contributors') return accept({ body: '', checkedAt: now(), status: 204 }, auth);
       if (response.status !== 200) {
         // Do not relay upstream error bodies, which can contain privileged details.
-        throw new HttpError([401, 403, 404, 422].includes(response.status) ? response.status : 502, `GitHub request failed (${response.status})`, undefined, 'UPSTREAM_REQUEST_FAILED');
+        throw new HttpError(response.status >= 400 && response.status < 500 ? response.status : 502, `GitHub request failed (${response.status})`, undefined, 'UPSTREAM_REQUEST_FAILED');
       }
       if (data === undefined || data === null) throw new HttpError(502, 'Invalid GitHub JSON response');
       if (route.kind === 'repo' && data?.private !== false) throw new HttpError(403, 'Only public repositories are supported');
@@ -231,17 +231,17 @@ export function createProxy(config: Config, dependencies: Dependencies) {
       if (config.origins === '*') headers.set('Access-Control-Allow-Origin', '*');
       else if (origin) headers.set('Access-Control-Allow-Origin', origin);
       headers.set('Access-Control-Expose-Headers', 'Link, X-Proxy-Cache, X-Proxy-Checked-At, Retry-After');
-      if (!['GET', 'OPTIONS'].includes(request.method)) {
-        headers.set('Allow', 'GET, OPTIONS'); throw new HttpError(405, 'Only GET and OPTIONS are supported');
+      if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
+        headers.set('Allow', 'GET, HEAD, OPTIONS'); throw new HttpError(405, 'Only GET, HEAD and OPTIONS are supported');
       }
       const url = new URL(request.url);
       const route = parseRoute(url.pathname + url.search, config);
       if (request.method === 'OPTIONS') {
-        if (request.headers.has('access-control-request-method') && request.headers.get('access-control-request-method') !== 'GET') throw new HttpError(405, 'Only GET is supported');
+        if (request.headers.has('access-control-request-method') && !['GET', 'HEAD'].includes(request.headers.get('access-control-request-method')!)) throw new HttpError(405, 'Only GET and HEAD are supported');
         const requested = request.headers.get('access-control-request-headers');
-        if (requested && requested.split(',').some(h => h.trim().toLowerCase() !== 'accept')) throw new HttpError(400, 'Unsupported request headers');
-        headers.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
-        headers.set('Access-Control-Allow-Headers', 'Accept');
+        if (requested && requested.split(',').some(h => !['accept', 'content-type', 'x-requested-with'].includes(h.trim().toLowerCase()))) throw new HttpError(400, 'Unsupported request headers');
+        headers.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+        headers.set('Access-Control-Allow-Headers', 'Accept, Content-Type, X-Requested-With');
         return new Response(null, { status: 204, headers });
       }
       const result = await load(route);
@@ -267,11 +267,12 @@ export function createProxy(config: Config, dependencies: Dependencies) {
         }
       }
       log({ event: 'response', cache: result.state, path: route.path });
-      return new Response(result.entry.status === 204 ? null : result.entry.body, { status: result.entry.status ?? 200, headers });
+      return new Response(request.method === 'HEAD' || result.entry.status === 204 ? null : result.entry.body, { status: result.entry.status ?? 200, headers });
     } catch (error) {
       const failure = error instanceof HttpError ? error : new HttpError(500, 'Internal proxy error');
       log({ event: 'response_error', status: failure.status });
-      return errorResponse(failure, headers);
+      const response = errorResponse(failure, headers);
+      return request.method === 'HEAD' ? new Response(null, { status: response.status, headers: response.headers }) : response;
     }
   };
 }

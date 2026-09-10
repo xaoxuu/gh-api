@@ -2,11 +2,24 @@ import { type Config, HttpError, ownerPattern, repoPattern } from './config.js';
 
 export interface Route { path: string; query: string; repository?: string; kind: string }
 const pagination = ['page', 'per_page'];
+const cacheNoise = new Set(['_', 'timestamp']);
+
+function queryInput(query: string): URLSearchParams {
+  const input = new URLSearchParams(query);
+  for (const key of cacheNoise) {
+    if (!input.has(key)) continue;
+    if (input.getAll(key).length !== 1) throw new HttpError(400, `Duplicate query parameter: ${key}`);
+    const value = input.get(key)!;
+    if (value.length > 500 || /[\x00-\x1f\x7f]/.test(value)) throw new HttpError(400, `Invalid query parameter: ${key}`);
+    input.delete(key);
+  }
+  return input;
+}
 const repositoryLists: Record<string, string[]> = {
   stargazers: pagination, subscribers: pagination,
   forks: [...pagination, 'sort'], branches: [...pagination, 'protected'],
   commits: [...pagination, 'sha', 'path', 'author', 'committer', 'since', 'until'],
-  languages: [], topics: [], labels: pagination,
+  languages: [], topics: pagination, labels: pagination,
   milestones: [...pagination, 'state', 'sort', 'direction'],
   pulls: [...pagination, 'state', 'head', 'base', 'sort', 'direction'],
 };
@@ -20,7 +33,7 @@ export function parseRoute(raw: string, config: Config): Route {
   const [path, query = '', ...extra] = raw.split('?');
   if (extra.length || /%|\/\//.test(path)) throw new HttpError(400, 'Encoded or empty path segments are not supported');
   if (path === '/' || path === '/rate_limit') {
-    const input = new URLSearchParams(query);
+    const input = queryInput(query);
     if (input.size) throw new HttpError(400, 'Unsupported query parameter');
     return { path, query: '', kind: path === '/' ? 'discovery' : 'rate-limit' };
   }
@@ -51,7 +64,7 @@ export function parseRoute(raw: string, config: Config): Route {
     const suffix = tail.join('/');
     if (!suffix) kind = 'repo';
     else if (suffix === 'issues') {
-      kind = 'issues'; allowed = [...pagination, 'state', 'labels', 'sort', 'direction', 'since', 'creator', 'mentioned', 'assignee', 'milestone'];
+      kind = 'issues'; allowed = [...pagination, 'state', 'labels', 'sort', 'direction', 'since', 'creator', 'mentioned', 'assignee', 'milestone', 'type', 'issue_field_values'];
     } else if (/^issues\/[1-9]\d*$/.test(suffix)) kind = 'issue';
     else if (/^issues\/[1-9]\d*\/comments$/.test(suffix) || suffix === 'issues/comments') {
       kind = 'comments'; allowed = [...pagination, 'since'];
@@ -60,14 +73,14 @@ export function parseRoute(raw: string, config: Config): Route {
     else if (suffix === 'releases') { kind = 'releases'; allowed = pagination; }
     else if (suffix === 'tags') { kind = 'tags'; allowed = pagination; }
     else if (/^releases\/(latest|[1-9]\d*)$/.test(suffix)) kind = 'release';
-    else if (suffix === 'contributors') { kind = 'contributors'; allowed = [...pagination, 'anon']; }
+    else if (suffix === 'contributors') { kind = 'contributors'; allowed = [...pagination, 'anon', 'direction']; }
     else if (Object.hasOwn(repositoryLists, suffix)) { kind = suffix; allowed = repositoryLists[suffix]; }
     else if (/^pulls\/[1-9]\d*$/.test(suffix)) kind = 'pull';
     else if (/^milestones\/[1-9]\d*$/.test(suffix)) kind = 'milestone';
     else if (/^issues\/[1-9]\d*\/labels$/.test(suffix)) { kind = 'issue-labels'; allowed = pagination; }
   }
   if (!kind) throw new HttpError(404, 'Unsupported endpoint');
-  const input = new URLSearchParams(query);
+  const input = queryInput(query);
   const output = new URLSearchParams();
   for (const [key, value] of input) {
     if (!allowed.includes(key)) throw new HttpError(400, `Unsupported query parameter: ${key.slice(0, 80)}`);
@@ -78,17 +91,19 @@ export function parseRoute(raw: string, config: Config): Route {
       type: kind === 'org-repos' ? ['public', 'forks', 'sources'] : ['all', 'owner', 'member'],
       sort: ['user-repos', 'org-repos'].includes(kind) ? ['created', 'updated', 'pushed', 'full_name']
         : kind === 'issues' ? ['created', 'updated', 'comments']
-        : kind === 'forks' ? ['newest', 'oldest', 'stargazers']
+        : kind === 'forks' ? ['newest', 'oldest', 'stargazers', 'watchers']
         : kind === 'milestones' ? ['due_on', 'completeness']
         : kind === 'pulls' ? ['created', 'updated', 'popularity', 'long-running']
         : ['created', 'updated'],
     };
-    if (enums[key] && !enums[key].includes(value)) throw new HttpError(400, `Invalid ${key}`);
+    if (!(kind === 'issues' && key === 'type') && enums[key] && !enums[key].includes(value)) throw new HttpError(400, `Invalid ${key}`);
     if (pagination.includes(key)) {
-      if (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) > (key === 'per_page' ? 100 : 10000)) throw new HttpError(400, `Invalid ${key}`);
+      if (!/^\d+$/.test(value) || Number(value) < 1 || !Number.isSafeInteger(Number(value)) || Number(value) > (key === 'per_page' ? 100 : 10000)) throw new HttpError(400, `Invalid ${key}`);
     }
     if (['since', 'until'].includes(key) && (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value) || !Number.isFinite(Date.parse(value)))) throw new HttpError(400, `Invalid ${key}`);
-    output.set(key, value);
+    // This endpoint has fixed descending order; ignore validated legacy direction.
+    if (kind === 'contributors' && key === 'direction') continue;
+    output.set(key, pagination.includes(key) ? String(Number(value)) : value);
   }
   if (kind === 'org-repos' && !output.has('type')) output.set('type', 'public');
   output.sort();

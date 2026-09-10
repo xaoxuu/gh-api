@@ -45,7 +45,7 @@ for (const resource of ['followers', 'following', 'orgs', 'starred', 'subscripti
 }
 const options = await get('/users/xaoxuu', { method: 'OPTIONS', headers: { 'Access-Control-Request-Method': 'GET' } });
 assert.equal(options.status, 204);
-assert.equal(options.headers.get('access-control-allow-methods'), 'GET, OPTIONS');
+assert.equal(options.headers.get('access-control-allow-methods'), 'GET, HEAD, OPTIONS');
 assert.equal((await get('/users/gh-api-denied-smoke-test')).status, 403);
 assert.equal((await get('/users/xaoxuu', { method: 'POST' })).status, 405);
 console.log('Deployment smoke checks passed');
