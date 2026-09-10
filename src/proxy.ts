@@ -1,6 +1,6 @@
 import { type Cache, MemoryCache } from './cache.js';
 import { type Config, hash, HttpError } from './config.js';
-import { parseRoute, redirectRoute, type Route, routeUrl } from './routes.js';
+import { paginationRoute, parseRoute, redirectRoute, type Route, routeUrl } from './routes.js';
 
 interface Entry { body: string; checkedAt: number; etag?: string; link?: string; status?: 200 | 204 }
 interface Result { entry: Entry; state: 'HIT' | 'MISS' | 'REVALIDATED' | 'STALE'; retryAfter?: number }
@@ -21,6 +21,7 @@ export function createProxy(config: Config, dependencies: Dependencies) {
   let queued = 0;
   let cooldown = 0;
   let consecutiveLimits = 0;
+  const ttlFor = (route: Route) => route.kind === 'rate-limit' ? Math.min(5, config.ttl) : config.ttl;
   const keyOf = (route: Route) => `${config.prefix}:${hash(routeUrl(route))}`;
 
   async function read<T>(key: string): Promise<T | undefined> {
@@ -155,7 +156,7 @@ export function createProxy(config: Config, dependencies: Dependencies) {
       }
       if (data === undefined || data === null) throw new HttpError(502, 'Invalid GitHub JSON response');
       if (route.kind === 'repo' && data?.private !== false) throw new HttpError(403, 'Only public repositories are supported');
-      if (route.kind === 'user-repos' && (!Array.isArray(data) || data.some(repo => repo.private !== false))) throw new HttpError(403, 'Only public repositories are supported');
+      if (['user-repos', 'org-repos', 'user-starred', 'user-subscriptions', 'forks'].includes(route.kind) && (!Array.isArray(data) || data.some(repo => repo.private !== false))) throw new HttpError(403, 'Only public repositories are supported');
       consecutiveLimits = 0;
       return { body: text, checkedAt: now(), etag: response.headers.get('etag') ?? undefined, link: response.headers.get('link') ?? undefined };
     }
@@ -168,12 +169,12 @@ export function createProxy(config: Config, dependencies: Dependencies) {
     if (pending) return pending;
     const job = (async (): Promise<Result> => {
       const cached = await read<Entry>(key);
-      if (cached && age(cached) < config.ttl) return { entry: cached, state: 'HIT' };
+      if (cached && age(cached) < ttlFor(route)) return { entry: cached, state: 'HIT' };
       try {
         return await serial(async () => {
           // Another instance may have filled the regional cache while this request queued.
           const latest = await read<Entry>(key);
-          if (latest && age(latest) < config.ttl) return { entry: latest, state: 'HIT' };
+          if (latest && age(latest) < ttlFor(route)) return { entry: latest, state: 'HIT' };
           const entry = await upstream(route, latest ?? cached, AbortSignal.timeout(config.timeout));
           await write(key, entry, config.maxAge);
           return { entry, state: latest || cached ? 'REVALIDATED' : 'MISS' };
@@ -181,7 +182,7 @@ export function createProxy(config: Config, dependencies: Dependencies) {
       } catch (error) {
         const failure = error instanceof HttpError ? error : new HttpError(502, 'GitHub request timed out or failed');
         if ([401, 403, 404].includes(failure.status)) await remove(key);
-        if ([429, 502, 503].includes(failure.status) && cached && age(cached) < config.maxAge) {
+        if (route.kind !== 'rate-limit' && [429, 502, 503].includes(failure.status) && cached && age(cached) < config.maxAge) {
           return { entry: cached, state: 'STALE', retryAfter: failure.retryAfter };
         }
         throw failure;
@@ -226,14 +227,14 @@ export function createProxy(config: Config, dependencies: Dependencies) {
         const links: string[] = [];
         for (const match of result.entry.link.matchAll(/<([^>]+)>;\s*rel="(next|prev|first|last)"/g)) {
           try {
-            const target = redirectRoute(match[1], route, config);
+            const target = paginationRoute(match[1], route, config);
             links.push(`<${target.path}${target.query ? `?${target.query}` : ''}>; rel="${match[2]}"`);
           } catch { /* Never forward unsupported pagination destinations. */ }
         }
         if (links.length) headers.set('Link', links.join(', '));
       }
       if (result.state !== 'STALE') {
-        const remaining = Math.floor(config.ttl - age(result.entry));
+        const remaining = Math.floor(ttlFor(route) - age(result.entry));
         if (remaining > 0) {
           headers.set('Cache-Control', 'public, max-age=0, must-revalidate');
           headers.set('Vercel-CDN-Cache-Control', `public, s-maxage=${remaining}, must-revalidate`);

@@ -41,12 +41,18 @@ console.log(issues, response.headers.get('X-Proxy-Cache'));
 
 成功响应保留 GitHub JSON 结构。分页不会自动聚合，`Link` 响应头中的 GitHub 地址会改写为 `/...` 相对地址；前端应以代理域名解析它，例如 `new URL(nextPath, 'https://YOUR-PROJECT.vercel.app')`。JSON 内的 `url` 等字段保持原样，继续请求时应使用下表中的代理接口。
 
-直接使用以下根路径，无需添加 `/api/github` 等前缀：
+## 支持的接口
+
+直接访问 `/` 返回 GitHub API 入口 JSON，保留 GitHub 原始链接。`/rate_limit` 返回服务端 Token 的额度信息，最多缓存 5 秒，不使用过期数据兜底；冷却期间遵守重试时间。这两个入口无需匹配 owner/repo 白名单，不接受查询参数。入口 JSON 中列出的链接不代表代理开放了所有接口。
 
 | GitHub 路径 | 支持查询参数 |
 | --- | --- |
 | `/users/:owner` | 无 |
 | `/users/:owner/repos` | `page`, `per_page`, `type`, `sort`, `direction` |
+| `/users/:owner/followers`、`/users/:owner/following`、`/users/:owner/orgs`、`/users/:owner/subscriptions` | `page`, `per_page` |
+| `/users/:owner/starred` | `page`, `per_page`, `sort`, `direction` |
+| `/orgs/:owner` | 无 |
+| `/orgs/:owner/repos` | `page`, `per_page`, `type`, `sort`, `direction` |
 | `/repos/:owner/:repo` | 无 |
 | `/repos/:owner/:repo/issues` | `page`, `per_page`, `state`, `labels`, `sort`, `direction`, `since`, `creator`, `mentioned`, `assignee`, `milestone` |
 | `/repos/:owner/:repo/issues/:number` | 无 |
@@ -54,16 +60,27 @@ console.log(issues, response.headers.get('X-Proxy-Cache'));
 | `/repos/:owner/:repo/issues/comments` | `page`, `per_page`, `since`, `sort`, `direction` |
 | `/repos/:owner/:repo/issues/comments/:id` | 无 |
 | `/repos/:owner/:repo/releases` | `page`, `per_page` |
+| `/repos/:owner/:repo/tags` | `page`, `per_page` |
 | `/repos/:owner/:repo/releases/latest`、`/releases/:id` | 无 |
 | `/repos/:owner/:repo/contributors` | `page`, `per_page`, `anon` |
+| `/repos/:owner/:repo/stargazers`、`/repos/:owner/:repo/subscribers` | `page`, `per_page` |
+| `/repos/:owner/:repo/forks` | `page`, `per_page`, `sort` |
+| `/repos/:owner/:repo/branches` | `page`, `per_page`, `protected` |
+| `/repos/:owner/:repo/commits` | `page`, `per_page`, `sha`, `path`, `author`, `committer`, `since`, `until` |
+| `/repos/:owner/:repo/languages`、`/repos/:owner/:repo/topics` | 无 |
+| `/repos/:owner/:repo/labels`、`/repos/:owner/:repo/issues/:number/labels` | `page`, `per_page` |
+| `/repos/:owner/:repo/milestones` | `page`, `per_page`, `state`, `sort`, `direction` |
+| `/repos/:owner/:repo/milestones/:number` | 无 |
+| `/repos/:owner/:repo/pulls` | `page`, `per_page`, `state`, `head`, `base`, `sort`, `direction` |
+| `/repos/:owner/:repo/pulls/:number` | 无 |
 
-仅接受 `GET` 和 `OPTIONS`。`per_page` 为 1–100，`page` 为 1–10000；`since` 使用 UTC 格式 `YYYY-MM-DDTHH:mm:ssZ`。其他枚举遵循对应 GitHub 接口；不接受重复参数、随机缓存破坏参数、编码路径段或任意上游 URL。搜索、文件内容、GraphQL、写接口和当前登录身份 `/user` 不在支持范围内。GitHub Issues 列表可能包含 Pull Request，这是 GitHub 原始行为。
+仅接受 `GET` 和 `OPTIONS`。`per_page` 为 1–100，`page` 为 1–10000；`since` 和 `until` 使用 UTC 格式 `YYYY-MM-DDTHH:mm:ssZ`。其他枚举遵循对应 GitHub 接口；不接受重复参数、随机缓存破坏参数、编码路径段或任意上游 URL。搜索、文件内容、GraphQL、写接口和当前登录身份 `/user` 不在支持范围内。GitHub Issues 列表可能包含 Pull Request，这是 GitHub 原始行为。
 
-owner 可为用户或组织名称。组织的仓库接口正常支持；资料和仓库列表使用 GitHub `/users/:owner` 系列端点，不额外提供 `/orgs` 接口。
+owner 可为用户或组织名称。`/users` 和 `/orgs` 下的接口需要 owner 级白名单授权。组织仓库列表默认只查询公开仓库，`type` 可选 `public`、`forks`、`sources`。Stargazers 使用 GitHub 默认的用户列表格式；Watchers 对应 `/subscribers`。Branches 和 Commits 提供列表接口。
 
 ## 环境变量
 
-只需设置 `GITHUB_TOKEN` 和 `GITHUB_ALLOWLIST` 即可运行，其余配置均可省略。缓存和超时参数会去除首尾空白；空值、非整数或超出下表范围时自动使用默认值。`CACHE_MAX_AGE_SECONDS` 小于实际新鲜期时也回退到 86400 秒，不再因此返回 500。非法或空的 `CACHE_NAMESPACE` 使用项目 ID（本地为 `gh-api`），空 `CACHE_VERSION` 使用 `1`。Token、白名单和显式设置的 CORS 规则继续严格校验，避免错误配置意外扩大访问范围。
+只需设置 `GITHUB_TOKEN` 和 `GITHUB_ALLOWLIST` 即可运行，其余配置均可省略。缓存和超时参数会去除首尾空白；空值、非整数或超出下表范围时自动使用默认值。`CACHE_MAX_AGE_SECONDS` 小于实际新鲜期时也回退到 86400 秒。非法或空的 `CACHE_NAMESPACE` 使用项目 ID（本地为 `gh-api`），空 `CACHE_VERSION` 使用 `1`。Token、白名单和显式设置的 CORS 规则严格校验，避免错误配置意外扩大访问范围。
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -71,7 +88,7 @@ owner 可为用户或组织名称。组织的仓库接口正常支持；资料�
 | `GITHUB_ALLOWLIST` | 空 | 逗号分隔的 owner 或 owner/repo |
 | `CACHE_TTL_SECONDS` | `1800` | 新鲜期，1–86400 秒 |
 | `CACHE_MAX_AGE_SECONDS` | `86400` | 上游故障时可返回的数据最大年龄，从上次成功校验起计算；不得小于新鲜期，最多 604800 秒 |
-| `CACHE_NAMESPACE` | Vercel 项目 ID，本地 `gh-api` | 缓存命名空间，建议每个项目使用不同值；示例文件为 `gh-api` |
+| `CACHE_NAMESPACE` | Vercel 项目 ID，本地 `gh-api` | 缓存命名空间，建议每个项目使用不同值 |
 | `CACHE_VERSION` | `1` | 手动切换 Runtime Cache 版本，修改后重新部署 |
 | `CORS_ORIGINS` | `*` | 未设置或空值使用默认值；或逗号分隔的 HTTP(S) Origin，例如 `https://example.com,http://localhost:5173`。自动去除首尾空白、尾部斜杠并规范化域名大小写及默认端口；不接受路径、查询参数或账号密码 |
 | `GITHUB_TIMEOUT_MS` | `10000` | 一次回源工作（包含公开性检查和重定向）的超时，100–15000 毫秒 |
@@ -98,7 +115,7 @@ GitHub 普通认证主额度通常为每小时 5000 次；认证条件请求的 
 
 ## Vercel 部署
 
-1. 将仓库导入 Vercel，Framework Preset 选择 **Other**，Node.js 选择 **24.x**。项目已配置构建命令、`public` 输出目录、API rewrite 和单区域函数。
+1. 将仓库导入 Vercel，Framework Preset 选择 **Other**，Node.js 选择 **24.x**。项目已配置构建命令、`public` 输出目录、API 路由和单区域函数。
 2. 在 Production 环境配置上表变量。只需设置 `GITHUB_TOKEN`、`GITHUB_ALLOWLIST`，缓存命名空间默认使用项目 ID。Preview 若需测试应单独配置环境变量。
 3. 部署后使用生成的域名。项目不需要数据库、Redis、定时任务或管理页面。
 
@@ -106,17 +123,15 @@ GitHub 普通认证主额度通常为每小时 5000 次；认证条件请求的 
 
 这表示环境变量校验失败，请求尚未发送到 GitHub。日志和 JSON 响应中的 `field` 会指出配置项，`reason` 给出修正要求；不会输出 Token 或其他环境变量值。
 
-最小配置是 `GITHUB_TOKEN`（填写真实 Token）和 `GITHUB_ALLOWLIST=xaoxuu`。在 Vercel 项目 Settings → Environment Variables 中配置，确认勾选当前部署环境（生产域名通常为 Production），然后重新部署。`.env.example` 不会自动成为线上环境变量，其中空的 `GITHUB_TOKEN` 也不能直接使用。缓存、超时及命名空间的旧空值或非法值会自动回退，无需逐个删除；显式配置的白名单和 CORS 规则仍需正确填写。
+最小配置是 `GITHUB_TOKEN`（填写真实 Token）和 `GITHUB_ALLOWLIST=xaoxuu`。在 Vercel 项目 Settings → Environment Variables 中配置，确认勾选当前部署环境（生产域名通常为 Production），然后重新部署。`.env.example` 不会自动成为线上环境变量，其中空的 `GITHUB_TOKEN` 也不能直接使用。缓存、超时及命名空间参数会自动回退到有效默认值。
 
-旧版本如果只打印 `{ "event": "configuration_error" }`，请部署此版本以查看具体配置项。仅凭旧日志无法确定是哪一项错误。无效或过期但格式正确的 Token 通常会在请求 GitHub 后得到 `401`，与启动时的配置错误不同。
+无效或过期但格式正确的 Token 通常会在请求 GitHub 后得到 `401`，与启动时的配置错误不同。
 
 ### 白名单撤销与旧部署
 
 环境变量是部署快照，**只编辑 Vercel 环境变量不会改变运行中的部署**。修改白名单、Token、CORS 或 TTL 后，必须重新部署并将新部署切换到生产域名。
 
 新部署有独立 CDN 缓存键；新的配置指纹隔离原来的 Runtime Cache，所以生产域名不再复用旧授权响应。旧部署的独立 URL 仍使用旧白名单，必须通过 Deployment Protection 限制访问或删除旧部署，才算完成所有地址的撤权。回滚旧部署同样会恢复旧配置，需要重新部署当前配置。详见 [Vercel CDN 缓存键](https://vercel.com/docs/caching/cdn-cache/purge)。
-
-不要把“清空缓存”当作更改授权：旧部署仍会按旧规则重新获取数据。
 
 ### 部署后验收
 
@@ -133,3 +148,5 @@ curl -i -H 'Origin: https://example.com' 'https://YOUR-PROJECT.vercel.app/repos/
 - 撤销一条规则并重新部署后，原 URL 应返回 `403`，同时检查旧部署已保护或删除。
 
 自动测试覆盖应用层缓存隔离与响应头；真实 CDN 命中、部署 rewrite 和旧部署访问限制需要在部署后按以上步骤验收。本项目不会在本地测试过程中自动发布。
+
+本项目另有 `node scripts/smoke.mjs https://YOUR-PROJECT.vercel.app` 在线验收脚本，以白名单用户 `xaoxuu` 验证资料、分页、CDN 命中、预检和访问限制。它会请求真实服务，需在可访问 Vercel 的网络中运行；受保护的候选部署可通过环境变量 `SMOKE_BYPASS_SECRET` 传入项目的自动化访问凭证，不要把凭证写进命令参数或源码。

@@ -184,6 +184,70 @@ test('pagination links stay on proxy; client auth/cookies/accept are not forward
   assert.doesNotMatch(JSON.stringify(f.logs) + JSON.stringify([...response.headers]) + await response.text(), /server-secret|client-secret/);
 });
 
+test('real GitHub user-ID pagination links are returned as named proxy URLs', async () => {
+  const f = fixture([json([], 200, { link: '<https://api.github.com/user/123/repos?per_page=1&page=2>; rel="next"' })]);
+  const response = await f.handler(request('/users/alice/repos?per_page=1'));
+  assert.equal(response.headers.get('link'), '</users/alice/repos?page=2&per_page=1>; rel="next"');
+});
+
+test('repository tags support pagination, caching and repository authorization', async () => {
+  const tags = [{ name: 'v1.0.0', commit: { sha: 'abc123', url: 'https://api.github.com/repos/alice/repo/commits/abc123' } }];
+  const f = fixture([json({ private: false }), json(tags, 200, { link: '<https://api.github.com/repositories/123/tags?per_page=1&page=2>; rel="next"' })]);
+  const response = await f.handler(request('/repos/alice/repo/tags?per_page=1&page=1'));
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), tags);
+  assert.equal(response.headers.get('link'), '</repos/alice/repo/tags?page=2&per_page=1>; rel="next"');
+  assert.equal((await f.handler(request('/repos/alice/repo/tags?page=1&per_page=1'))).headers.get('x-proxy-cache'), 'HIT');
+  assert.equal((await f.handler(request('/repos/bob/repo/tags'))).status, 403);
+  assert.equal((await f.handler(request('/repos/alice/repo/tags?per_page=101'))).status, 400);
+  assert.equal((await f.handler(request('/repos/alice/repo/tags', { method: 'POST' }))).status, 405);
+  assert.equal(f.calls.length, 2);
+});
+
+test('common public repository lists use the same visibility checks and cache', async () => {
+  for (const suffix of ['stargazers', 'subscribers', 'forks', 'branches', 'commits', 'labels', 'milestones', 'pulls', 'issues/1/labels']) {
+    const f = fixture([json({ private: false }), json([])]);
+    const path = `/repos/alice/repo/${suffix}?per_page=1`;
+    assert.equal((await f.handler(request(path))).status, 200, suffix);
+    assert.equal((await f.handler(request(path))).headers.get('x-proxy-cache'), 'HIT');
+    assert.equal((await f.handler(request(path, { method: 'POST' }))).status, 405);
+    assert.equal((await f.handler(request(path.replace('/alice/', '/bob/')))).status, 403);
+    assert.equal(f.calls.length, 2);
+  }
+  for (const suffix of ['languages', 'topics', 'pulls/1', 'milestones/1']) {
+    const f = fixture([json({ private: false }), json({})]);
+    assert.equal((await f.handler(request(`/repos/alice/repo/${suffix}`))).status, 200);
+  }
+});
+
+test('new query parameters are validated for their specific endpoints', () => {
+  for (const path of ['/repos/alice/repo/forks?sort=stargazers', '/repos/alice/repo/branches?protected=true', '/repos/alice/repo/pulls?sort=popularity&head=alice%3Afeature%2Ftest&state=all', '/repos/alice/repo/milestones?sort=completeness', '/repos/alice/repo/commits?sha=feature%2Ftest&path=src%2Findex.ts&until=2026-01-01T00%3A00%3A00Z']) assert.doesNotThrow(() => parseRoute(path, config));
+  for (const path of ['/repos/alice/repo/stargazers?sort=created', '/repos/alice/repo/branches?protected=maybe', '/repos/alice/repo/commits?until=invalid', '/repos/alice/repo/forks?sort=updated', '/repos/alice/repo/milestones?sort=created', '/repos/alice/repo/traffic/views', '/repos/alice/repo/collaborators', '/repos/alice/repo/hooks']) assert.throws(() => parseRoute(path, config));
+});
+
+test('public user lists and organization endpoints require owner-level authorization', async () => {
+  for (const suffix of ['followers', 'following', 'orgs', 'starred', 'subscriptions']) {
+    const f = fixture([json([])]);
+    assert.equal((await f.handler(request(`/users/alice/${suffix}?per_page=1`))).status, 200);
+    assert.equal((await f.handler(request(`/users/vercel/${suffix}`))).status, 403);
+  }
+  const f = fixture([json({ login: 'alice' }), json([{ private: false }])]);
+  assert.equal((await f.handler(request('/orgs/alice'))).status, 200);
+  assert.equal((await f.handler(request('/orgs/alice/repos?per_page=1'))).status, 200);
+  assert.equal(f.calls[1].url, 'https://api.github.com/orgs/alice/repos?per_page=1&type=public');
+  assert.equal((await f.handler(request('/orgs/vercel/repos'))).status, 403);
+  assert.equal((await f.handler(request('/orgs/alice/repos?type=private'))).status, 400);
+});
+
+test('new repository collections reject private data even with an overprivileged token', async () => {
+  for (const path of ['/users/alice/starred', '/users/alice/subscriptions', '/orgs/alice/repos']) {
+    const f = fixture([json([{ private: true }])]);
+    assert.equal((await f.handler(request(path))).status, 403);
+  }
+  const f = fixture([json({ private: false }), json([{ private: true }])]);
+  assert.equal((await f.handler(request('/repos/alice/repo/forks'))).status, 403);
+});
+
 test('methods and CORS are checked even when a cache entry exists', async () => {
   const f = fixture([json({ n: 1 })], { CORS_ORIGINS: 'https://site.test' });
   await f.handler(request());
@@ -279,4 +343,33 @@ test('memory cache honors TTL and capacity', async () => {
   assert.equal(await cache.get('b'), '12345678');
   time = 10000;
   assert.equal(await cache.get('b'), undefined);
+});
+
+test('discovery and quota preserve upstream JSON without opening other endpoints', async () => {
+  const discovery = { current_user_url: 'https://api.github.com/user', rate_limit_url: 'https://api.github.com/rate_limit' };
+  const quota = { resources: { core: { limit: 5000, remaining: 4999 } } };
+  const f = fixture([json(discovery), json(quota)], { GITHUB_ALLOWLIST: '' });
+  assert.deepEqual(await (await f.handler(request('/'))).json(), discovery);
+  const response = await f.handler(request('/rate_limit', { headers: { Authorization: 'Bearer client-secret' } }));
+  assert.deepEqual(await response.json(), quota);
+  assert.equal(response.headers.get('vercel-cdn-cache-control'), 'public, s-maxage=5, must-revalidate');
+  assert.equal(new Headers(f.calls[1].init?.headers).get('authorization'), 'Bearer server-secret');
+  for (const path of ['/user', '/rate_limit/extra', '/rate_limit?page=1', '/?token=secret']) {
+    assert.notEqual((await f.handler(request(path))).status, 200);
+  }
+  assert.equal((await f.handler(request('/', { method: 'POST' }))).status, 405);
+  assert.equal(f.calls.length, 2);
+});
+
+test('quota cache expires after five seconds and never serves stale quota', async () => {
+  const f = fixture([json({ rate: { remaining: 42 } }), json({ rate: { remaining: 41 } }), json({}, 503)]);
+  await f.handler(request('/rate_limit'));
+  f.advance(4);
+  assert.equal((await f.handler(request('/rate_limit'))).headers.get('x-proxy-cache'), 'HIT');
+  f.advance(1);
+  assert.deepEqual(await (await f.handler(request('/rate_limit'))).json(), { rate: { remaining: 41 } });
+  f.advance(5);
+  const failed = await f.handler(request('/rate_limit'));
+  assert.equal(failed.status, 502);
+  assert.equal(failed.headers.get('vercel-cdn-cache-control'), 'no-store');
 });

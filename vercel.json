@@ -5,8 +5,8 @@
   "outputDirectory": "public",
   "regions": ["iad1"],
   "functions": { "api/index.ts": { "maxDuration": 30 } },
-  "rewrites": [
-    { "source": "/repos/:path*", "destination": "/api/index" },
-    { "source": "/users/:path*", "destination": "/api/index" }
+  "routes": [
+    { "src": "^/(?:rate_limit|(?:repos|users|orgs)(?:/.*)?)?$", "dest": "/api/index" },
+    { "handle": "filesystem" }
   ]
 }
