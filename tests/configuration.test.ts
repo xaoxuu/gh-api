@@ -31,8 +31,11 @@ test('API reports an actionable missing-token error in response and logs', async
     assert.equal(response.headers.get('vercel-cdn-cache-control'), 'no-store');
     const body = await response.json();
     assert.equal(body.code, 'INVALID_CONFIGURATION');
-    assert.equal(body.field, 'GITHUB_TOKEN');
-    assert.match(body.reason, /redeploy/);
+    assert.equal(body.success, false);
+    assert.equal(body.status, 500);
+    assert.equal(body.retryAfter, null);
+    assert.equal(body.details.field, 'GITHUB_TOKEN');
+    assert.match(body.details.reason, /redeploy/);
     assert.equal(JSON.parse(logs[0]).field, 'GITHUB_TOKEN');
   } finally {
     if (previous === undefined) delete process.env.GITHUB_TOKEN;

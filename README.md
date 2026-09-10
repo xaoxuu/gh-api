@@ -113,6 +113,36 @@ Runtime Cache 为区域性、可提前淘汰的临时缓存。读写失败记录
 
 GitHub 普通认证主额度通常为每小时 5000 次；认证条件请求的 `304` 不计主额度，但二级限流仍有效。吞吐量取决于不同请求数量、命中率和更新频率，不承诺无限请求。Vercel CDN/函数/缓存仍有自身用量和计费。参考 [GitHub 限流](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api)、[GitHub 最佳实践](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api)、[Vercel Runtime Cache](https://vercel.com/docs/caching/runtime-cache)。
 
+## 错误响应
+
+应用返回的错误统一使用以下 JSON 结构，HTTP 状态码与 `status` 一致，且禁止缓存：
+
+```json
+{
+  "success": false,
+  "code": "RATE_LIMITED",
+  "status": 429,
+  "message": "GitHub rate limit reached",
+  "details": null,
+  "retryAfter": 60
+}
+```
+
+前端先用 `response.ok` 判断请求是否成功，再按 `code` 处理错误；`message` 仅用于展示，不用于判断错误类型。所有错误都包含上述六个字段，`details` 无额外信息时为 `null`，`retryAfter` 无重试时间时为 `null`，否则为秒数，与 `Retry-After` 响应头一致。成功响应仍为 GitHub 原始 JSON，`204` 为空响应。
+
+| code | 含义 |
+| --- | --- |
+| `INVALID_REQUEST` | 路径、查询参数或预检请求头不合法 |
+| `FORBIDDEN` | 白名单、Origin 或公开仓库限制拒绝访问 |
+| `UNSUPPORTED_ENDPOINT` | 不支持的接口 |
+| `METHOD_NOT_ALLOWED` | 不支持的 HTTP 方法 |
+| `UPSTREAM_REQUEST_FAILED` | GitHub 请求失败，结合 `status` 区分 401/403/404/422；其他异常状态映射为 502 |
+| `RATE_LIMITED` | GitHub 限流或冷却中 |
+| `UPSTREAM_ERROR` | GitHub 服务异常、网络/超时、响应格式或大小异常 |
+| `SERVICE_UNAVAILABLE` | 上游队列已满或等待超时 |
+| `INVALID_CONFIGURATION` | 服务配置异常，`details` 包含安全的 `field` 和 `reason`（未知原因时为 `null`） |
+| `INTERNAL_ERROR` | 代理内部异常 |
+
 ## Vercel 部署
 
 1. 将仓库导入 Vercel，Framework Preset 选择 **Other**，Node.js 选择 **24.x**。项目已配置构建命令、`public` 输出目录、API 路由和单区域函数。
@@ -121,7 +151,7 @@ GitHub 普通认证主额度通常为每小时 5000 次；认证条件请求的 
 
 ### 排查 `configuration_error` / HTTP 500
 
-这表示环境变量校验失败，请求尚未发送到 GitHub。日志和 JSON 响应中的 `field` 会指出配置项，`reason` 给出修正要求；不会输出 Token 或其他环境变量值。
+这表示环境变量校验失败，请求尚未发送到 GitHub。JSON 响应中的 `details.field` 会指出配置项，`details.reason` 给出修正要求（原顶层 `field`、`reason` 已移入 `details`）；日志保留顶层 `field`、`reason`。不会输出 Token 或其他环境变量值。
 
 最小配置是 `GITHUB_TOKEN`（填写真实 Token）和 `GITHUB_ALLOWLIST=xaoxuu`。在 Vercel 项目 Settings → Environment Variables 中配置，确认勾选当前部署环境（生产域名通常为 Production），然后重新部署。`.env.example` 不会自动成为线上环境变量，其中空的 `GITHUB_TOKEN` 也不能直接使用。缓存、超时及命名空间参数会自动回退到有效默认值。
 

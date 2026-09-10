@@ -1,10 +1,6 @@
 import { createHash } from 'node:crypto';
 
-export class HttpError extends Error {
-  constructor(public status: number, message: string, public retryAfter?: number) {
-    super(message);
-  }
-}
+export { HttpError } from './errors.js';
 
 /** Only static validation messages belong here; never include environment values. */
 export class ConfigurationError extends Error {

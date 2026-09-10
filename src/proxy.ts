@@ -1,5 +1,6 @@
 import { type Cache, MemoryCache } from './cache.js';
 import { type Config, hash, HttpError } from './config.js';
+import { errorResponse } from './errors.js';
 import { paginationRoute, parseRoute, redirectRoute, type Route, routeUrl } from './routes.js';
 
 interface Entry { body: string; checkedAt: number; etag?: string; link?: string; status?: 200 | 204 }
@@ -152,7 +153,7 @@ export function createProxy(config: Config, dependencies: Dependencies) {
       if (response.status === 204 && route.kind === 'contributors') return { body: '', checkedAt: now(), status: 204 };
       if (response.status !== 200) {
         // Do not relay upstream error bodies, which can contain privileged details.
-        throw new HttpError([401, 403, 404, 422].includes(response.status) ? response.status : 502, `GitHub request failed (${response.status})`);
+        throw new HttpError([401, 403, 404, 422].includes(response.status) ? response.status : 502, `GitHub request failed (${response.status})`, undefined, 'UPSTREAM_REQUEST_FAILED');
       }
       if (data === undefined || data === null) throw new HttpError(502, 'Invalid GitHub JSON response');
       if (route.kind === 'repo' && data?.private !== false) throw new HttpError(403, 'Only public repositories are supported');
@@ -244,9 +245,8 @@ export function createProxy(config: Config, dependencies: Dependencies) {
       return new Response(result.entry.status === 204 ? null : result.entry.body, { status: result.entry.status ?? 200, headers });
     } catch (error) {
       const failure = error instanceof HttpError ? error : new HttpError(500, 'Internal proxy error');
-      if (failure.retryAfter) headers.set('Retry-After', String(failure.retryAfter));
       log({ event: 'response_error', status: failure.status });
-      return new Response(JSON.stringify({ message: failure.message }), { status: failure.status, headers });
+      return errorResponse(failure, headers);
     }
   };
 }

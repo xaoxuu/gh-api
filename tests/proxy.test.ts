@@ -373,3 +373,38 @@ test('quota cache expires after five seconds and never serves stale quota', asyn
   assert.equal(failed.status, 502);
   assert.equal(failed.headers.get('vercel-cdn-cache-control'), 'no-store');
 });
+
+test('errors have a fixed envelope and distinguish local rejection from upstream failure', async () => {
+  const cases = [
+    { path: '/users/alice?unknown=1', status: 400, code: 'INVALID_REQUEST' },
+    { path: '/users/bob', status: 403, code: 'FORBIDDEN' },
+    { path: '/unsupported', status: 404, code: 'UNSUPPORTED_ENDPOINT' },
+    { path: '/users/alice', method: 'POST', status: 405, code: 'METHOD_NOT_ALLOWED' },
+    ...[401, 403, 404, 422].map(status => ({ path: '/users/alice', upstream: status, status, code: 'UPSTREAM_REQUEST_FAILED' })),
+    { path: '/users/alice', upstream: 503, status: 502, code: 'UPSTREAM_ERROR' },
+  ];
+  for (const entry of cases) {
+    const upstream = 'upstream' in entry ? entry.upstream : undefined;
+    const f = fixture(upstream ? [json({ message: 'private upstream details' }, upstream)] : []);
+    const response = await f.handler(request(entry.path, { method: 'method' in entry ? entry.method : 'GET' }));
+    const body = await response.json();
+    assert.equal(response.status, entry.status);
+    assert.deepEqual(body, { success: false, code: entry.code, status: entry.status, message: body.message, details: null, retryAfter: null });
+    assert.equal(typeof body.message, 'string');
+    assert.doesNotMatch(body.message, /private upstream details/);
+    assert.match(response.headers.get('content-type')!, /application\/json/);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal(response.headers.get('access-control-allow-origin'), '*');
+  }
+});
+
+test('rate limit and cooldown expose retry seconds in the same error envelope', async () => {
+  const f = fixture([json({}, 429, { 'retry-after': '60' })]);
+  for (let i = 0; i < 2; i++) {
+    const response = await f.handler(request());
+    const body = await response.json();
+    assert.deepEqual(body, { success: false, code: 'RATE_LIMITED', status: 429, message: body.message, details: null, retryAfter: 60 });
+    assert.equal(response.headers.get('retry-after'), String(body.retryAfter));
+  }
+  assert.equal(f.calls.length, 1);
+});

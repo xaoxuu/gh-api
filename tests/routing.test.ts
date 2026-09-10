@@ -66,9 +66,15 @@ test('root profile and paginated requests forward only supported explicit query 
   assert.deepEqual(calls, ['https://api.github.com/users/xaoxuu', 'https://api.github.com/users/xaoxuu/repos?page=2&per_page=20']);
   const unsupported = await get('/users/xaoxuu?path=xaoxuu');
   assert.equal(unsupported.status, 400);
-  assert.deepEqual(await unsupported.json(), { message: 'Unsupported query parameter: path' });
+  assert.deepEqual(await unsupported.json(), {
+    success: false, code: 'INVALID_REQUEST', status: 400,
+    message: 'Unsupported query parameter: path', details: null, retryAfter: null,
+  });
   const duplicate = await get('/users/xaoxuu/repos?page=1&page=2');
   assert.equal(duplicate.status, 400);
-  assert.deepEqual(await duplicate.json(), { message: 'Duplicate query parameter: page' });
+  assert.deepEqual(await duplicate.json(), {
+    success: false, code: 'INVALID_REQUEST', status: 400,
+    message: 'Duplicate query parameter: page', details: null, retryAfter: null,
+  });
   assert.equal(calls.length, 2);
 });
