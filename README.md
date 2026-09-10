@@ -1,51 +1,46 @@
 # gh-api
 
-[![Vercel](https://img.shields.io/badge/Vercel-000000?style=flat&logo=vercel&logoColor=white)](#vercel-部署)
+[English](README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md)
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fxaoxuu%2Fgh-api&env=GITHUB_TOKEN%2CGITHUB_ALLOWLIST&envLink=https%3A%2F%2Fgithub.com%2Fxaoxuu%2Fgh-api%23%E7%8E%AF%E5%A2%83%E5%8F%98%E9%87%8F&project-name=gh-api&repository-name=gh-api)
+[![Vercel](https://img.shields.io/badge/Vercel-000000?style=flat&logo=vercel&logoColor=white)](#vercel-deployment)
 
-基于 Node.js 和 TypeScript 的 GitHub 只读 API 代理，可直接部署到 Vercel。前端通过代理访问白名单内的公开资源，无需持有 GitHub Token。
+A read-only GitHub API proxy built with Node.js and TypeScript, ready to deploy to Vercel. Frontends can access allowlisted public resources without holding a GitHub token.
 
-- **按需开放资源**：支持按用户、组织或单个仓库配置白名单。
-- **减少 GitHub 请求**：结合 Vercel CDN、区域 Runtime Cache、ETag 条件请求和实例内请求合并复用数据。
-- **便于前端接入**：保留 GitHub JSON 结构，提供 CORS、分页链接和统一错误响应。
-- **部署简单**：无需数据库、Redis 或定时任务。
+- **Control resource access**: allowlist users, organizations, or individual repositories.
+- **Reduce GitHub requests**: reuse data through Vercel CDN, regional Runtime Cache, ETag conditional requests, and request coalescing within each instance.
+- **Connect your frontend**: preserve GitHub JSON structures with CORS, pagination links, and consistent error responses.
+- **Deploy easily**: no database, Redis, or scheduled jobs required.
 
-[快速开始](#快速开始) · [支持的接口](#支持的接口) · [环境变量](#环境变量) · [缓存与异常处理](#缓存与异常处理) · [错误响应](#错误响应) · [Vercel 部署](#vercel-部署)
+[Quick start](#quick-start) · [Supported endpoints](#supported-endpoints) · [Error responses](#error-responses) · [Environment variables](#environment-variables) · [Deployment maintenance and troubleshooting](#deployment-maintenance-and-troubleshooting) · [Caching and failure handling](#caching-and-failure-handling) · [Local development](#local-development)
 
-## 快速开始
+## Quick start
 
-### 本地运行
+### Vercel deployment
 
-需要 Node.js 24 和 npm。
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fxaoxuu%2Fgh-api&env=GITHUB_TOKEN%2CGITHUB_ALLOWLIST&envLink=https%3A%2F%2Fgithub.com%2Fxaoxuu%2Fgh-api%23environment-variables&project-name=gh-api&repository-name=gh-api)
 
-```sh
-npm ci
-cp .env.example .env
-# 编辑 .env，设置 GITHUB_TOKEN 和 GITHUB_ALLOWLIST
-npm run dev
-```
+Click **Deploy with Vercel** to clone the repository and create a Vercel project. You will be prompted for `GITHUB_TOKEN` and `GITHUB_ALLOWLIST`; see [Environment variables](#environment-variables). To import manually:
 
-服务默认运行在 `http://localhost:3000`，使用有容量上限的内存缓存。修改 `.env` 后需重启服务。
+1. Import the repository into Vercel. Select **Other** as the Framework Preset and **24.x** for Node.js. The project already configures the build command, `public` output directory, API routing, and a single-region function.
+2. Set [environment variables](#environment-variables) for Production. Only `GITHUB_TOKEN` and `GITHUB_ALLOWLIST` need to be set; the cache namespace defaults to the project ID. Configure Preview variables separately if needed for testing.
+3. Use the generated domain after deployment. No database, Redis, scheduled jobs, or administration page is needed.
 
-运行 `npm run check` 可执行 TypeScript 检查和模拟上游测试，无需真实 Token，也不会访问 GitHub。
-
-### 配置白名单
+### Configure the allowlist
 
 ```dotenv
 GITHUB_ALLOWLIST=xaoxuu,vercel/next.js
 ```
 
-| 写法 | 授权范围 |
+| Rule | Authorized resources |
 | --- | --- |
-| `owner` | 该 owner 的公开资料、公开仓库列表，以及全部公开仓库的受支持接口，包括以后新建的仓库 |
-| `owner/repo` | 仅该仓库的受支持接口，不授权 owner 资料、仓库列表或其他仓库 |
+| `owner` | The owner's public profile, public repository list, and supported endpoints for all public repositories, including repositories created later |
+| `owner/repo` | Supported endpoints for that repository only; does not authorize the owner's profile, repository list, or other repositories |
 
-规则忽略大小写，自动去除首尾空白和重复项，多条规则共同生效。匹配时使用完整名称，不做前缀匹配。
+Rules are case-insensitive. Leading and trailing whitespace and duplicates are removed, and all rules apply together. Names must match in full; prefix matching is not used.
 
-白名单为空时，拒绝所有需要 owner 或仓库授权的请求；`/` 和 `/rate_limit` 不受白名单限制。空条目、通配符或额外路径等格式错误会导致配置校验失败。
+An empty allowlist denies all requests requiring owner or repository authorization. `/` and `/rate_limit` are exempt. Invalid formats such as empty entries, wildcards, or extra path segments fail configuration validation.
 
-### 前端调用
+### Call from your frontend
 
 ```js
 const response = await fetch(
@@ -56,140 +51,78 @@ const issues = await response.json();
 console.log(issues, response.headers.get('X-Proxy-Cache'));
 ```
 
-成功响应保留 GitHub JSON 结构。分页不会自动聚合，`Link` 响应头中的 GitHub 地址会改写为 `/...` 相对地址；前端应以代理域名解析它，例如 `new URL(nextPath, 'https://YOUR-PROJECT.vercel.app')`。JSON 内的 `url` 等字段保持原样，继续请求时应使用下表中的代理接口。
+Successful responses preserve GitHub JSON structures. Pages are not automatically aggregated. GitHub URLs in the `Link` response header are rewritten as `/...` relative URLs; resolve them against the proxy domain, for example with `new URL(nextPath, 'https://YOUR-PROJECT.vercel.app')`. Fields such as `url` inside JSON remain unchanged. Use the proxy endpoints below for subsequent requests.
 
-## 支持的接口
+## Supported endpoints
 
-代理仅开放以下接口，支持 `GET`、`HEAD` 和 `OPTIONS`。
+Only the following endpoints are exposed, with support for `GET`, `HEAD`, and `OPTIONS`.
 
-### 入口与额度
+### API root and rate limits
 
-| 路径 | 说明 |
+| Path | Description |
 | --- | --- |
-| `/` | 返回 GitHub API 入口 JSON，保留其中的 GitHub 原始链接 |
-| `/rate_limit` | 返回服务端 Token 的额度信息，最多缓存 5 秒，不使用过期数据兜底，冷却期间遵守重试时间 |
+| `/` | Returns the GitHub API root JSON, preserving its original GitHub links |
+| `/rate_limit` | Returns rate limit information for the server token; cached for at most 5 seconds, never served stale, and respects retry times during cooldown |
 
-这两个入口无需匹配白名单，仅接受并移除 `_`、`timestamp` 参数。入口 JSON 中的链接不代表代理支持所有 GitHub 接口。
+These two endpoints do not require an allowlist match. They only accept—and remove—the `_` and `timestamp` parameters. Links in the root JSON do not imply support for every GitHub endpoint.
 
-### 用户、组织与仓库
+### Users, organizations, and repositories
 
-| GitHub 路径 | 支持查询参数 |
+| GitHub path | Supported query parameters |
 | --- | --- |
-| `/users/:owner` | 无 |
+| `/users/:owner` | None |
 | `/users/:owner/repos` | `page`, `per_page`, `type`, `sort`, `direction` |
-| `/users/:owner/followers`、`/users/:owner/following`、`/users/:owner/orgs`、`/users/:owner/subscriptions` | `page`, `per_page` |
+| `/users/:owner/followers`, `/users/:owner/following`, `/users/:owner/orgs`, `/users/:owner/subscriptions` | `page`, `per_page` |
 | `/users/:owner/starred` | `page`, `per_page`, `sort`, `direction` |
-| `/orgs/:owner` | 无 |
+| `/orgs/:owner` | None |
 | `/orgs/:owner/repos` | `page`, `per_page`, `type`, `sort`, `direction` |
-| `/repos/:owner/:repo` | 无 |
+| `/repos/:owner/:repo` | None |
 | `/repos/:owner/:repo/issues` | `page`, `per_page`, `state`, `labels`, `sort`, `direction`, `since`, `creator`, `mentioned`, `assignee`, `milestone`, `type`, `issue_field_values` |
-| `/repos/:owner/:repo/issues/:number` | 无 |
+| `/repos/:owner/:repo/issues/:number` | None |
 | `/repos/:owner/:repo/issues/:number/comments` | `page`, `per_page`, `since` |
 | `/repos/:owner/:repo/issues/comments` | `page`, `per_page`, `since`, `sort`, `direction` |
-| `/repos/:owner/:repo/issues/comments/:id` | 无 |
+| `/repos/:owner/:repo/issues/comments/:id` | None |
 | `/repos/:owner/:repo/releases` | `page`, `per_page` |
 | `/repos/:owner/:repo/tags` | `page`, `per_page` |
-| `/repos/:owner/:repo/releases/latest`、`/repos/:owner/:repo/releases/:id` | 无 |
-| `/repos/:owner/:repo/contributors` | `page`, `per_page`, `anon`；兼容 `direction=asc/desc`（忽略） |
-| `/repos/:owner/:repo/stargazers`、`/repos/:owner/:repo/subscribers` | `page`, `per_page` |
+| `/repos/:owner/:repo/releases/latest`, `/repos/:owner/:repo/releases/:id` | None |
+| `/repos/:owner/:repo/contributors` | `page`, `per_page`, `anon`; accepts `direction=asc/desc` for compatibility (ignored) |
+| `/repos/:owner/:repo/stargazers`, `/repos/:owner/:repo/subscribers` | `page`, `per_page` |
 | `/repos/:owner/:repo/forks` | `page`, `per_page`, `sort` |
 | `/repos/:owner/:repo/branches` | `page`, `per_page`, `protected` |
 | `/repos/:owner/:repo/commits` | `page`, `per_page`, `sha`, `path`, `author`, `committer`, `since`, `until` |
-| `/repos/:owner/:repo/languages` | 无 |
+| `/repos/:owner/:repo/languages` | None |
 | `/repos/:owner/:repo/topics` | `page`, `per_page` |
-| `/repos/:owner/:repo/labels`、`/repos/:owner/:repo/issues/:number/labels` | `page`, `per_page` |
+| `/repos/:owner/:repo/labels`, `/repos/:owner/:repo/issues/:number/labels` | `page`, `per_page` |
 | `/repos/:owner/:repo/milestones` | `page`, `per_page`, `state`, `sort`, `direction` |
-| `/repos/:owner/:repo/milestones/:number` | 无 |
+| `/repos/:owner/:repo/milestones/:number` | None |
 | `/repos/:owner/:repo/pulls` | `page`, `per_page`, `state`, `head`, `base`, `sort`, `direction` |
-| `/repos/:owner/:repo/pulls/:number` | 无 |
+| `/repos/:owner/:repo/pulls/:number` | None |
 
-### 请求与参数规则
+### Request and parameter rules
 
-`HEAD` 复用 `GET` 的公开性检查、授权和缓存逻辑，仅省略响应正文；冷缓存时仍需通过 `GET` 回源。CORS 预检允许 `Accept`、`Content-Type` 和 `X-Requested-With`，这些客户端请求头不会原样转发给 GitHub。
+`HEAD` uses the same public visibility checks, authorization, and caching as `GET`, omitting only the response body. A cold cache still requires an upstream `GET`. CORS preflight allows `Accept`, `Content-Type`, and `X-Requested-With`; these client headers are not forwarded verbatim to GitHub.
 
-- **分页**：`per_page` 为 1–100，`page` 为 1–10000；允许前导零，并规范化为普通整数。
-- **时间**：`since` 和 `until` 使用 UTC 格式 `YYYY-MM-DDTHH:mm:ssZ`。
-- **枚举**：允许值以对应接口的校验规则为准，部分接口的特殊规则见下文。
-- **缓存参数**：所有入口统一移除 `_` 和 `timestamp`，它们不参与 Runtime Cache 键。
-- **输入限制**：拒绝未知参数、重复参数、编码路径段和任意上游 URL。
+- **Pagination**: `per_page` accepts 1–100 and `page` accepts 1–10000. Leading zeros are allowed and normalized to ordinary integers.
+- **Timestamps**: `since` and `until` use UTC format `YYYY-MM-DDTHH:mm:ssZ`.
+- **Enumerations**: allowed values follow each endpoint's validation rules; some exceptions are described below.
+- **Cache parameters**: `_` and `timestamp` are removed from every endpoint and excluded from Runtime Cache keys.
+- **Input restrictions**: unknown parameters, duplicate parameters, encoded path segments, and arbitrary upstream URLs are rejected.
 
-搜索、文件内容、GraphQL、写接口和当前登录身份 `/user` 不在支持范围内。GitHub Issues 列表可能包含 Pull Request，这是 GitHub 的原始行为。
+Search, file contents, GraphQL, write endpoints, and the authenticated identity endpoint `/user` are unsupported. GitHub Issues lists may include pull requests, matching GitHub's original behavior.
 
-### 部分接口的特殊规则
+### Endpoint-specific rules
 
-owner 可为用户或组织名称。`/users` 和 `/orgs` 下的接口需要 owner 级白名单授权。组织仓库列表默认只查询公开仓库，`type` 可选 `public`、`forks`、`sources`。Stargazers 使用 GitHub 默认的用户列表格式；Watchers 对应 `/subscribers`。Branches 和 Commits 提供列表接口。
+An owner can be a user or organization name. Endpoints under `/users` and `/orgs` require an owner-level allowlist entry. Organization repository lists query public repositories only by default; `type` accepts `public`, `forks`, or `sources`. Stargazers use GitHub's default user-list format; watchers correspond to `/subscribers`. Branches and commits are available as list endpoints.
 
-- **Contributors**：固定按贡献数降序返回。兼容参数 `direction=asc/desc` 会在校验后移除，不改变排序，并与不带该参数的请求共用 Runtime Cache。
-- **Forks**：`sort` 支持 `newest`、`oldest`、`stargazers` 和 `watchers`。
-- **Issues**：`type` 接受类型名称、`*` 或 `none`；`issue_field_values` 接受 `priority:Urgent` 等字段筛选，需仓库启用对应字段。这些规则不适用于组织仓库列表的 `type`。
+- **Contributors**: always returned in descending contribution order. The compatibility parameter `direction=asc/desc` is validated and removed; it does not affect ordering and shares Runtime Cache with requests that omit it.
+- **Forks**: `sort` supports `newest`, `oldest`, `stargazers`, and `watchers`.
+- **Issues**: `type` accepts a type name, `*`, or `none`. `issue_field_values` accepts field filters such as `priority:Urgent`, provided the repository has enabled those fields. These rules do not apply to `type` on organization repository lists.
 
-参数规范化仅合并 Runtime Cache 和回源请求；不同原始 URL 的 Vercel CDN 缓存仍可能分开。参数规范化不会绕过公开性检查、白名单、接口限制、输入长度限制或限流策略。
+Parameter normalization only consolidates Runtime Cache and upstream requests. Vercel CDN may still cache different original URLs separately. Normalization does not bypass public visibility checks, the allowlist, endpoint restrictions, input length limits, or rate limiting.
 
-## 环境变量
+## Error responses
 
-设置 `GITHUB_TOKEN` 和 `GITHUB_ALLOWLIST` 即可开始使用，其余配置均可省略。
-
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `GITHUB_TOKEN` | 必填 | GitHub fine-grained PAT，Repository access 选择 **Public repositories (read-only)**；不要授予私有仓库权限 |
-| `GITHUB_ALLOWLIST` | 空 | 逗号分隔的 owner 或 owner/repo |
-| `CACHE_TTL_SECONDS` | `1800` | 新鲜期，1–86400 秒 |
-| `CACHE_MAX_AGE_SECONDS` | `86400` | 上游故障时可返回的数据最大年龄，从上次成功校验起计算；不得小于新鲜期，最多 604800 秒 |
-| `CACHE_NAMESPACE` | Vercel 项目 ID，本地 `gh-api` | 缓存命名空间，建议每个项目使用不同值 |
-| `CACHE_VERSION` | `1` | 手动切换 Runtime Cache 版本，修改后重新部署 |
-| `CORS_ORIGINS` | `*` | 未设置或空值使用默认值；或逗号分隔的 HTTP(S) Origin，例如 `https://example.com,http://localhost:5173`。自动去除首尾空白、尾部斜杠并规范化域名大小写及默认端口；不接受路径、查询参数或账号密码 |
-| `GITHUB_TIMEOUT_MS` | `10000` | 一次回源工作（包含公开性检查和重定向）的超时，100–15000 毫秒 |
-| `PORT` | `3000` | 仅本地服务 |
-
-### 默认值与校验
-
-缓存和超时参数会去除首尾空白；空值、非整数或超出表中范围时，自动使用默认值。`CACHE_MAX_AGE_SECONDS` 小于实际新鲜期时，也会回退到 86400 秒。
-
-非法或空的 `CACHE_NAMESPACE` 使用项目 ID（本地为 `gh-api`），空 `CACHE_VERSION` 使用 `1`。Token、白名单和显式设置的 CORS 规则会严格校验，避免错误配置意外扩大访问范围。
-
-### Token 与访问边界
-
-Token 永不返回前端，也不记录在日志中。客户端 Authorization、Cookie 和自定义 Accept 不会传给 GitHub。仓库信息必须明确为 `private: false`；仓库子接口回源前先检查并缓存仓库公开性，防止 Token 权限误配导致读取私有仓库。访问控制和公开性检查反映缓存时点，GitHub 上的可见性变化可能在新鲜期结束后才被发现，因此仍应使用仅公开资源 Token。
-
-CORS 是浏览器跨域策略，不是身份认证；没有 Origin 的服务端调用仍可访问白名单内资源。请勿在前端嵌入所谓“秘密 API Key”。
-
-## 缓存与异常处理
-
-### 缓存流程
-
-1. Vercel CDN 直接服务新鲜响应，减少函数调用；Runtime Cache 在 CDN 未命中时复用区域数据。
-2. 缓存键包含项目、部署环境、配置指纹、路径和排序后的查询参数。指纹包含白名单、Token 的哈希和缓存/CORS 配置。客户端刷新或添加请求头不会强制回源。
-3. 过期后携带 ETag 请求 GitHub；`304` 复用正文并更新校验时间。没有 ETag 时重新读取正文。一次返回新数据的请求，CDN TTL 不超过该数据剩余新鲜期；浏览器使用 `max-age=0, must-revalidate`，其他 CDN 使用 `no-store`。
-4. 单实例相同请求合并，不同回源串行执行。队列最多 32 项，等待最多 5 秒。函数固定 `iad1`，多实例仍可能同时回源；不提供分布式锁或严格全局速率保证。
-5. 确认限流后共享冷却截止时间并保留实例内状态；遵守 `Retry-After` 和主额度重置时间，无有效时间时至少等待 60 秒，连续二级限流逐次延长等待。冷却期间不主动重试。
-
-### 组织 Token 策略与匿名重试
-
-仓库请求遇到 GitHub 明确返回“PAT 有效期超过组织上限”的 `403` 时，移除 Authorization 匿名重试一次（重定向仍受原有白名单和次数限制）。仓库公开性检查和内容请求均支持此兜底；匿名结果仍须通过公开性校验。成功后按仓库记住匿名模式 5 分钟，到期后的回源重新优先使用 Token；更换 Token 会隔离旧的降级记录。切换认证方式不复用原 ETag，成功数据照常缓存。
-
-匿名兜底不适用于普通权限拒绝、SSO/IP 限制、无效 Token、限流或 `/rate_limit`。Token 与匿名请求分别记录冷却时间；匿名额度通常仅每出口 IP 每小时 60 次，冷却状态在当前项目和部署环境内共享，不保证跨项目或跨出口的全局限流。日志只记录 `github_anonymous_fallback` 的固定原因以及 `github_anonymous_result` 的状态码，不记录 Token 或 GitHub 原始错误正文。
-
-### 上游故障与旧数据
-
-`429`、上游 `5xx`、网络失败或队列过载时，尽可能返回允许年龄内的旧数据，且响应 `no-store`。没有旧数据则返回 `429`、`502` 或 `503`。普通 `401/403/404` 会移除对应缓存，直接返回错误；其他上游 `4xx` 也保留原状态，均不使用旧数据兜底，不转发上游错误正文。
-
-### 响应头与缓存限制
-
-| 响应头 | 说明 |
-| --- | --- |
-| `X-Proxy-Cache` | 应用层缓存状态：`MISS`、`HIT`、`REVALIDATED` 或 `STALE` |
-| `X-Proxy-Checked-At` | 数据上次成功校验的时间 |
-| `Retry-After` | 距离可重试时间的秒数，按需返回 |
-
-CDN 命中时，这些响应头是生成缓存时的快照。判断 CDN 是否命中，应结合 Vercel 的 `x-vercel-cache` 和 `Age`。
-
-Runtime Cache 为区域性、可提前淘汰的临时缓存。读写失败记录 `cache_degraded`，回退到最多 256 项、16 MiB 的实例内 LRU 缓存。单个 GitHub 响应限制为 768 KiB，超出时返回 `502`，请减小 `per_page`。空仓库贡献者接口的 `204` 保持空响应。
-
-GitHub 普通认证主额度通常为每小时 5000 次；认证条件请求的 `304` 不计主额度，但二级限流仍有效。吞吐量取决于不同请求数量、命中率和更新频率，不承诺无限请求。Vercel CDN/函数/缓存仍有自身用量和计费。参考 [GitHub 限流](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api)、[GitHub 最佳实践](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api)、[Vercel Runtime Cache](https://vercel.com/docs/caching/runtime-cache)。
-
-## 错误响应
-
-应用返回的错误统一使用以下 JSON 结构，HTTP 状态码与 `status` 一致，且禁止缓存：
+Application errors use the following JSON structure. The HTTP status matches `status`, and caching is disabled:
 
 ```json
 {
@@ -202,63 +135,134 @@ GitHub 普通认证主额度通常为每小时 5000 次；认证条件请求的 
 }
 ```
 
-前端先用 `response.ok` 判断请求是否成功，再按 `code` 处理错误；`message` 仅用于展示，不用于判断错误类型。错误 JSON 均包含上述六个字段，`details` 无额外信息时为 `null`，`retryAfter` 无重试时间时为 `null`，否则为秒数，与 `Retry-After` 响应头一致。成功响应仍为 GitHub 原始 JSON；`204` 和 `HEAD` 响应均无正文。
+Check `response.ok` first, then handle errors by `code`. Use `message` for display only, not to identify error types. Every error JSON includes all six fields above. `details` is `null` when no additional information is available. `retryAfter` is `null` when no retry time is available; otherwise it is a number of seconds matching the `Retry-After` header. Successful responses remain GitHub's original JSON; `204` and `HEAD` responses have no body.
 
-| code | 含义 |
+| code | Meaning |
 | --- | --- |
-| `INVALID_REQUEST` | 路径、查询参数或预检请求头不合法 |
-| `FORBIDDEN` | 白名单、Origin 或公开仓库限制拒绝访问 |
-| `UNSUPPORTED_ENDPOINT` | 不支持的接口 |
-| `METHOD_NOT_ALLOWED` | 不支持的 HTTP 方法 |
-| `UPSTREAM_REQUEST_FAILED` | GitHub 请求失败，普通 `4xx` 保留原状态（限流单独处理）；其他异常状态映射为 502 |
-| `RATE_LIMITED` | GitHub 限流或冷却中 |
-| `UPSTREAM_ERROR` | GitHub 服务异常、网络/超时、响应格式或大小异常 |
-| `SERVICE_UNAVAILABLE` | 上游队列已满或等待超时 |
-| `INVALID_CONFIGURATION` | 服务配置异常，`details` 包含安全的 `field` 和 `reason`（未知原因时为 `null`） |
-| `INTERNAL_ERROR` | 代理内部异常 |
+| `INVALID_REQUEST` | Invalid path, query parameters, or preflight request headers |
+| `FORBIDDEN` | Access denied by the allowlist, Origin policy, or public repository restriction |
+| `UNSUPPORTED_ENDPOINT` | Unsupported endpoint |
+| `METHOD_NOT_ALLOWED` | Unsupported HTTP method |
+| `UPSTREAM_REQUEST_FAILED` | GitHub request failed; ordinary `4xx` statuses are preserved (rate limits are handled separately), while other unexpected statuses map to 502 |
+| `RATE_LIMITED` | GitHub rate limit reached or cooldown active |
+| `UPSTREAM_ERROR` | GitHub service failure, network error/timeout, or invalid response format or size |
+| `SERVICE_UNAVAILABLE` | Upstream queue full or queue wait timed out |
+| `INVALID_CONFIGURATION` | Invalid service configuration; `details` contains safe `field` and `reason` values (or is `null` when the cause is unknown) |
+| `INTERNAL_ERROR` | Internal proxy error |
 
-## Vercel 部署
+## Environment variables
 
-点击顶部 **Deploy with Vercel** 按钮，即可克隆仓库并创建 Vercel 项目。部署流程会提示填写 `GITHUB_TOKEN` 和 `GITHUB_ALLOWLIST`，配置说明见[环境变量](#环境变量)。也可以按以下步骤手动导入：
+Set `GITHUB_TOKEN` and `GITHUB_ALLOWLIST` to get started. All other configuration is optional.
 
-1. 将仓库导入 Vercel，Framework Preset 选择 **Other**，Node.js 选择 **24.x**。项目已配置构建命令、`public` 输出目录、API 路由和单区域函数。
-2. 在 Production 环境配置上表变量。只需设置 `GITHUB_TOKEN`、`GITHUB_ALLOWLIST`，缓存命名空间默认使用项目 ID。Preview 若需测试应单独配置环境变量。
-3. 部署后使用生成的域名。项目不需要数据库、Redis、定时任务或管理页面。
+| Variable | Default | Description |
+| --- | --- | --- |
+| `GITHUB_TOKEN` | Required | GitHub fine-grained PAT with Repository access set to **Public repositories (read-only)**; do not grant private repository access |
+| `GITHUB_ALLOWLIST` | Empty | Comma-separated owner or owner/repo entries |
+| `CACHE_TTL_SECONDS` | `1800` | Freshness period, 1–86400 seconds |
+| `CACHE_MAX_AGE_SECONDS` | `86400` | Maximum age of data served during upstream failures, measured from the last successful validation; must be at least the freshness period and at most 604800 seconds |
+| `CACHE_NAMESPACE` | Vercel project ID; `gh-api` locally | Cache namespace; a distinct value per project is recommended |
+| `CACHE_VERSION` | `1` | Manually change the Runtime Cache version; redeploy after changing it |
+| `CORS_ORIGINS` | `*` | Unset or empty uses the default; otherwise a comma-separated list of HTTP(S) origins, such as `https://example.com,http://localhost:5173`. Trims whitespace and trailing slashes and normalizes hostname case and default ports; paths, query parameters, and credentials are rejected |
+| `GITHUB_TIMEOUT_MS` | `10000` | Timeout for one upstream operation, including public visibility checks and redirects; 100–15000 milliseconds |
+| `PORT` | `3000` | Local server only |
 
-### 排查配置错误（`INVALID_CONFIGURATION` / HTTP 500）
+### Defaults and validation
 
-响应代码 `INVALID_CONFIGURATION` 表示环境变量校验失败，请求尚未发送到 GitHub。`details.field` 指出配置项，`details.reason` 给出修正要求。日志中对应的事件为 `configuration_error`，其中 `field` 和 `reason` 位于顶层，不会输出 Token 或其他环境变量值。
+Cache and timeout parameters are trimmed. Empty values, non-integers, and values outside the ranges above fall back to defaults. `CACHE_MAX_AGE_SECONDS` also falls back to 86400 seconds if it is less than the effective freshness period.
 
-最小配置是 `GITHUB_TOKEN`（填写真实 Token）和 `GITHUB_ALLOWLIST=xaoxuu`。在 Vercel 项目 Settings → Environment Variables 中配置，确认勾选当前部署环境（生产域名通常为 Production），然后重新部署。`.env.example` 不会自动成为线上环境变量，其中空的 `GITHUB_TOKEN` 也不能直接使用。缓存、超时及命名空间参数会自动回退到有效默认值。
+An invalid or empty `CACHE_NAMESPACE` uses the project ID (`gh-api` locally); an empty `CACHE_VERSION` uses `1`. The token, allowlist, and explicitly configured CORS rules are strictly validated to avoid accidentally broadening access through misconfiguration.
 
-无效或过期但格式正确的 Token 通常会在请求 GitHub 后得到 `401`，与启动时的配置错误不同。
+### Token and access boundaries
 
-### 白名单撤销与旧部署
+The token is never returned to the frontend or logged. Client Authorization, Cookie, and custom Accept headers are not sent to GitHub. Repository metadata must explicitly contain `private: false`. Before fetching repository subresources, the proxy checks and caches public visibility to prevent private repository access through an overly permissive token. Access decisions and visibility checks reflect the cached state; visibility changes on GitHub may not be detected until freshness expires. Always use a token limited to public resources.
 
-环境变量是部署快照，**只编辑 Vercel 环境变量不会改变运行中的部署**。修改白名单、Token、CORS 或 TTL 后，必须重新部署并将新部署切换到生产域名。
+CORS is a browser cross-origin policy, not authentication. Server requests without an Origin can still access allowlisted resources. Do not embed a supposedly secret API key in frontend code.
 
-新部署有独立 CDN 缓存键；新的配置指纹隔离原来的 Runtime Cache，所以生产域名不再复用旧授权响应。旧部署的独立 URL 仍使用旧白名单，必须通过 Deployment Protection 限制访问或删除旧部署，才算完成所有地址的撤权。回滚旧部署同样会恢复旧配置，需要重新部署当前配置。详见 [Vercel CDN 缓存键](https://vercel.com/docs/caching/cdn-cache/purge)。
+## Deployment maintenance and troubleshooting
 
-### 部署后验收
+### Revoking access and old deployments
+
+Environment variables are deployment snapshots. **Editing Vercel environment variables alone does not change a running deployment.** After changing the allowlist, token, CORS, or TTL, redeploy and move the production domain to the new deployment.
+
+New deployments have separate CDN cache keys, and new configuration fingerprints isolate the previous Runtime Cache, so the production domain no longer reuses responses authorized by the old configuration. Old deployment URLs still use the old allowlist. Restrict them with Deployment Protection or delete those deployments to revoke access across all URLs. Rolling back also restores the old configuration; redeploy the current configuration instead. See [Vercel CDN cache keys](https://vercel.com/docs/caching/cdn-cache/purge).
+
+### Post-deployment verification
 
 ```sh
 curl -i 'https://YOUR-PROJECT.vercel.app/repos/vercel/next.js'
-# 再次请求相同 URL，检查 x-vercel-cache: HIT；也可使用 curl -I 验证 HEAD 响应
+# Repeat the URL and check x-vercel-cache: HIT; use curl -I to verify HEAD responses.
 curl -i 'https://YOUR-PROJECT.vercel.app/repos/vercel/next.js'
 curl -i -H 'Origin: https://example.com' 'https://YOUR-PROJECT.vercel.app/repos/vercel/next.js/issues?per_page=1'
 ```
 
-- 验证第二次请求 CDN 命中，并确认 Runtime 日志中没有新增同资源回源。
-- 检查分页 `Link` 指向代理；检查默认或配置后的 CORS 行为。
-- 请求白名单外仓库应返回 `403`，POST 应返回 `405`。
-- 撤销一条规则并重新部署后，原 URL 应返回 `403`，同时检查旧部署已保护或删除。
+- Verify a CDN hit on the second request and no new upstream fetch for the same resource in Runtime logs.
+- Check that pagination `Link` URLs point to the proxy and that default or configured CORS behavior works.
+- Requests for repositories outside the allowlist should return `403`; POST should return `405`.
+- Revoke a rule and redeploy: the original URL should return `403`. Also check that old deployments are protected or deleted.
 
-自动测试覆盖应用层缓存隔离与响应头；真实 CDN 命中、部署 rewrite 和旧部署访问限制需要在部署后按以上步骤验收。本项目不会在本地测试过程中自动发布。
+Automated tests cover application-level cache isolation and response headers. Real CDN hits, deployment rewrites, and access restrictions on old deployments require the checks above after deployment. Local tests do not automatically publish the project.
 
-也可运行在线验收脚本。脚本以白名单用户 `xaoxuu` 验证资料、分页、CDN 命中、预检和访问限制，请先确保白名单包含该用户：
+You can also run the live smoke test. It uses allowlisted user `xaoxuu` to check profiles, pagination, CDN hits, preflight, and access restrictions, so ensure this user is on the allowlist first:
 
 ```sh
 node scripts/smoke.mjs https://YOUR-PROJECT.vercel.app
 ```
 
-脚本会请求真实服务，需在可访问 Vercel 的网络中运行。受保护的候选部署可通过环境变量 `SMOKE_BYPASS_SECRET` 传入项目的自动化访问凭证，请勿将凭证写入命令参数或源码。
+The script calls the real service and requires network access to Vercel. For protected candidate deployments, pass the project's automation access credential through the `SMOKE_BYPASS_SECRET` environment variable. Do not put credentials in command arguments or source code.
+
+### Troubleshooting configuration errors (`INVALID_CONFIGURATION` / HTTP 500)
+
+`INVALID_CONFIGURATION` means environment variable validation failed before any request was sent to GitHub. `details.field` identifies the setting, and `details.reason` explains the required correction. The corresponding log event is `configuration_error`, with `field` and `reason` at the top level. Tokens and other environment variable values are not logged.
+
+The minimum configuration is `GITHUB_TOKEN` (a real token) and `GITHUB_ALLOWLIST=xaoxuu`. Configure these under Vercel project Settings → Environment Variables, select the current deployment environment (usually Production for the production domain), and redeploy. `.env.example` is not automatically used as production environment variables, and its empty `GITHUB_TOKEN` cannot be used as-is. Cache, timeout, and namespace settings fall back to valid defaults.
+
+A correctly formatted but invalid or expired token usually produces `401` after a request to GitHub, which differs from a configuration error at startup.
+
+## Caching and failure handling
+
+### Cache flow
+
+1. Vercel CDN serves fresh responses directly to reduce function invocations. Runtime Cache reuses regional data on CDN misses.
+2. Cache keys include the project, deployment environment, configuration fingerprint, path, and sorted query parameters. The fingerprint includes the allowlist, a token hash, and cache/CORS settings. Client refreshes or extra headers do not force upstream requests.
+3. After expiry, requests to GitHub include an ETag. A `304` reuses the body and updates the validation time; without an ETag, the body is fetched again. For a request returning fresh data, the CDN TTL does not exceed its remaining freshness period. Browsers use `max-age=0, must-revalidate`; other CDNs use `no-store`.
+4. Identical requests are coalesced within one instance, and distinct upstream operations run serially. The queue holds at most 32 entries with a maximum wait of 5 seconds. The function is fixed to `iad1`, but multiple instances can still fetch concurrently. There is no distributed lock or strict global rate guarantee.
+5. Confirmed rate limits share a cooldown deadline and retain instance-local state. The proxy respects `Retry-After` and the primary rate limit reset time. Without a valid time, it waits at least 60 seconds; consecutive secondary rate limits progressively extend the wait. No proactive retries occur during cooldown.
+
+### Organization token policies and anonymous retries
+
+When GitHub explicitly returns `403` because a PAT's lifetime exceeds an organization's maximum, repository requests retry once without Authorization. Redirects remain subject to the existing allowlist and redirect limits. This fallback applies to both repository visibility checks and content requests; anonymous results must still pass public visibility validation. After success, anonymous mode is remembered per repository for 5 minutes. Once it expires, upstream requests prefer the token again. Changing the token isolates previous fallback records. Switching authentication modes does not reuse the old ETag; successful data is cached normally.
+
+Anonymous fallback does not apply to ordinary permission denials, SSO/IP restrictions, invalid tokens, rate limits, or `/rate_limit`. Token and anonymous requests track cooldowns separately. Anonymous quota is usually only 60 requests per egress IP per hour. Cooldown state is shared within the current project and deployment environment, with no global rate guarantee across projects or egress IPs. Logs record only a fixed reason for `github_anonymous_fallback` and the status code for `github_anonymous_result`, never the token or GitHub's original error body.
+
+### Upstream failures and stale data
+
+For `429`, upstream `5xx`, network failures, or queue overload, the proxy serves stale data within the allowed age when possible, with `no-store`. Without stale data, it returns `429`, `502`, or `503`. Ordinary `401/403/404` responses remove the corresponding cache entry and return the error directly. Other upstream `4xx` statuses are also preserved. None of these ordinary 4xx errors use stale fallback, and upstream error bodies are not forwarded.
+
+### Response headers and cache limits
+
+| Header | Description |
+| --- | --- |
+| `X-Proxy-Cache` | Application-level cache status: `MISS`, `HIT`, `REVALIDATED`, or `STALE` |
+| `X-Proxy-Checked-At` | Time of the last successful data validation |
+| `Retry-After` | Seconds until a retry is allowed, returned when applicable |
+
+On CDN hits, these headers are snapshots from when the cached response was generated. Use Vercel's `x-vercel-cache` and `Age` to assess CDN hits.
+
+Runtime Cache is regional, temporary, and subject to early eviction. Read/write failures log `cache_degraded` and fall back to an instance-local LRU cache capped at 256 entries and 16 MiB. A single GitHub response is limited to 768 KiB; larger responses return `502`, so reduce `per_page`. A `204` from the contributors endpoint for an empty repository remains an empty response.
+
+GitHub's ordinary authenticated primary quota is usually 5000 requests per hour. Authenticated conditional requests returning `304` do not count against the primary quota, but secondary limits still apply. Throughput depends on the number of distinct requests, cache hit rate, and update frequency; unlimited requests are not guaranteed. Vercel CDN, functions, and caching have their own usage limits and billing. See [GitHub rate limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api), [GitHub best practices](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api), and [Vercel Runtime Cache](https://vercel.com/docs/caching/runtime-cache).
+
+## Local development
+
+Requires Node.js 24 and npm.
+
+```sh
+npm ci
+cp .env.example .env
+# Edit .env and set GITHUB_TOKEN and GITHUB_ALLOWLIST.
+npm run dev
+```
+
+The server runs at `http://localhost:3000` by default and uses a bounded in-memory cache. Restart it after changing `.env`.
+
+Run `npm run check` for TypeScript checks and tests with a simulated upstream. No real token is needed, and tests do not access GitHub.
