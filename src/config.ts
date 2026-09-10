@@ -46,8 +46,8 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
     (parts.length === 1 ? owners : repos).add(entry);
   }
   function integer(key: string, fallback: number, min: number, max: number) {
-    const value = env[key] ?? String(fallback);
-    if (!/^\d+$/.test(value) || Number(value) < min || Number(value) > max) throw new ConfigurationError(key, `${key} must be an integer between ${min} and ${max}`);
+    const value = env[key]?.trim() ?? '';
+    if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < min || Number(value) > max) return fallback;
     return Number(value);
   }
   const ttl = integer('CACHE_TTL_SECONDS', 1800, 1, 86400);
@@ -62,11 +62,12 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
     } catch { throw new ConfigurationError('CORS_ORIGINS', 'Use * or comma-separated HTTP(S) origins without paths or trailing slashes'); }
     return origin;
   }));
-  const namespace = env.CACHE_NAMESPACE ?? env.VERCEL_PROJECT_ID ?? 'gh-api';
-  if (!/^[\w-]{1,100}$/.test(namespace)) throw new ConfigurationError('CACHE_NAMESPACE', 'Use 1 to 100 letters, digits, underscores or hyphens');
+  const requestedNamespace = env.CACHE_NAMESPACE?.trim() ?? '';
+  const namespace = /^[\w-]{1,100}$/.test(requestedNamespace)
+    ? requestedNamespace : env.VERCEL_PROJECT_ID ?? 'gh-api';
   const fingerprint = hash(JSON.stringify({
     schema: 1, owners: [...owners].sort(), repos: [...repos].sort(), ttl, maxAge, timeout,
-    origins: origins === '*' ? '*' : [...origins].sort(), version: env.CACHE_VERSION ?? '1',
+    origins: origins === '*' ? '*' : [...origins].sort(), version: env.CACHE_VERSION?.trim() || '1',
     token: hash(token),
   }));
   const scope = `${namespace}:${env.VERCEL_ENV ?? 'development'}`;

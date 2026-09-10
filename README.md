@@ -63,6 +63,8 @@ owner 可为用户或组织名称。组织的仓库接口正常支持；资料�
 
 ## 环境变量
 
+只需设置 `GITHUB_TOKEN` 和 `GITHUB_ALLOWLIST` 即可运行，其余配置均可省略。缓存和超时参数会去除首尾空白；空值、非整数或超出下表范围时自动使用默认值。`CACHE_MAX_AGE_SECONDS` 小于实际新鲜期时也回退到 86400 秒，不再因此返回 500。非法或空的 `CACHE_NAMESPACE` 使用项目 ID（本地为 `gh-api`），空 `CACHE_VERSION` 使用 `1`。Token、白名单和显式设置的 CORS 规则继续严格校验，避免错误配置意外扩大访问范围。
+
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `GITHUB_TOKEN` | 必填 | GitHub fine-grained PAT，Repository access 选择 **Public repositories (read-only)**；不要授予私有仓库权限 |
@@ -97,14 +99,14 @@ GitHub 普通认证主额度通常为每小时 5000 次；认证条件请求的 
 ## Vercel 部署
 
 1. 将仓库导入 Vercel，Framework Preset 选择 **Other**，Node.js 选择 **24.x**。项目已配置构建命令、`public` 输出目录、API rewrite 和单区域函数。
-2. 在 Production 环境配置上表变量。至少设置 `GITHUB_TOKEN`、`GITHUB_ALLOWLIST`；项目间使用不同 `CACHE_NAMESPACE`。Preview 若需测试应单独配置环境变量。
+2. 在 Production 环境配置上表变量。只需设置 `GITHUB_TOKEN`、`GITHUB_ALLOWLIST`，缓存命名空间默认使用项目 ID。Preview 若需测试应单独配置环境变量。
 3. 部署后使用生成的域名。项目不需要数据库、Redis、定时任务或管理页面。
 
 ### 排查 `configuration_error` / HTTP 500
 
 这表示环境变量校验失败，请求尚未发送到 GitHub。日志和 JSON 响应中的 `field` 会指出配置项，`reason` 给出修正要求；不会输出 Token 或其他环境变量值。
 
-最小配置是 `GITHUB_TOKEN`（填写真实 Token）和 `GITHUB_ALLOWLIST=xaoxuu`。在 Vercel 项目 Settings → Environment Variables 中配置，确认勾选当前部署环境（生产域名通常为 Production），然后重新部署。`.env.example` 不会自动成为线上环境变量，其中空的 `GITHUB_TOKEN` 也不能直接使用。可选变量不需要时直接删除，不要填空字符串。
+最小配置是 `GITHUB_TOKEN`（填写真实 Token）和 `GITHUB_ALLOWLIST=xaoxuu`。在 Vercel 项目 Settings → Environment Variables 中配置，确认勾选当前部署环境（生产域名通常为 Production），然后重新部署。`.env.example` 不会自动成为线上环境变量，其中空的 `GITHUB_TOKEN` 也不能直接使用。缓存、超时及命名空间的旧空值或非法值会自动回退，无需逐个删除；显式配置的白名单和 CORS 规则仍需正确填写。
 
 旧版本如果只打印 `{ "event": "configuration_error" }`，请部署此版本以查看具体配置项。仅凭旧日志无法确定是哪一项错误。无效或过期但格式正确的 Token 通常会在请求 GitHub 后得到 `401`，与启动时的配置错误不同。
 

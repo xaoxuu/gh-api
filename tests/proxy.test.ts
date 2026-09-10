@@ -37,7 +37,7 @@ test('allowlist supports complete owners and exact repositories, independently',
 
 test('invalid configuration fails closed and fingerprint changes with access/cache/token config', () => {
   for (const value of ['alice/', '/repo', 'alice/repo/more', 'alice,,bob', '*', 'alice/..', 'alice /repo']) assert.throws(() => readConfig({ ...environment, GITHUB_ALLOWLIST: value }));
-  for (const vars of [{ GITHUB_TOKEN: '' }, { CACHE_TTL_SECONDS: '0' }, { CACHE_TTL_SECONDS: '1.5' }, { CACHE_MAX_AGE_SECONDS: '10' }, { CORS_ORIGINS: 'https://site.test/' }]) assert.throws(() => readConfig({ ...environment, ...vars }));
+  for (const vars of [{ GITHUB_TOKEN: '' }, { CORS_ORIGINS: 'https://site.test/' }]) assert.throws(() => readConfig({ ...environment, ...vars }));
   for (const vars of [{ GITHUB_ALLOWLIST: 'alice' }, { CACHE_TTL_SECONDS: '60' }, { CACHE_VERSION: '2' }, { GITHUB_TOKEN: 'new-secret' }]) assert.notEqual(config.prefix, readConfig({ ...environment, ...vars }).prefix);
   assert.equal(config.prefix, readConfig({ ...environment, GITHUB_ALLOWLIST: 'vercel/next.js,ALICE' }).prefix);
 });

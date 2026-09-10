@@ -7,11 +7,7 @@ test('configuration errors identify invalid fields without exposing their values
   const cases = [
     ['GITHUB_TOKEN', 'secret token'],
     ['GITHUB_ALLOWLIST', 'secret/repo/extra'],
-    ['CACHE_TTL_SECONDS', 'secret'],
-    ['CACHE_MAX_AGE_SECONDS', '1'],
-    ['GITHUB_TIMEOUT_MS', 'secret'],
     ['CORS_ORIGINS', 'https://secret.test/path'],
-    ['CACHE_NAMESPACE', 'secret/value'],
   ];
   for (const [field, value] of cases) {
     assert.throws(() => readConfig({ GITHUB_TOKEN: 'test-token', [field]: value }), error => {
@@ -43,4 +39,35 @@ test('API reports an actionable missing-token error in response and logs', async
     else process.env.GITHUB_TOKEN = previous;
     console.error = originalLog;
   }
+});
+
+
+test('optional numeric settings fall back for empty, malformed and out-of-range values', () => {
+  for (const value of ['', '   ', 'undefined', 'null', 'NaN', '-1', '0', '1.5', '999999999999999999999']) {
+    const config = readConfig({ GITHUB_TOKEN: 'test-token', CACHE_TTL_SECONDS: value, CACHE_MAX_AGE_SECONDS: value, GITHUB_TIMEOUT_MS: value });
+    assert.equal(config.ttl, 1800);
+    assert.equal(config.maxAge, 86400);
+    assert.equal(config.timeout, 10000);
+  }
+});
+
+test('stale age below configured freshness falls back without failing startup', () => {
+  const config = readConfig({ GITHUB_TOKEN: 'test-token', CACHE_TTL_SECONDS: '3600', CACHE_MAX_AGE_SECONDS: '1800' });
+  assert.equal(config.ttl, 3600);
+  assert.equal(config.maxAge, 86400);
+});
+
+test('valid trimmed settings are preserved and maximum age always covers freshness', () => {
+  const config = readConfig({ GITHUB_TOKEN: 'test-token', CACHE_TTL_SECONDS: ' 3600 ', CACHE_MAX_AGE_SECONDS: ' 7200 ', GITHUB_TIMEOUT_MS: ' 5000 ' });
+  assert.equal(config.ttl, 3600);
+  assert.equal(config.maxAge, 7200);
+  assert.equal(config.timeout, 5000);
+  const boundary = readConfig({ GITHUB_TOKEN: 'test-token', CACHE_TTL_SECONDS: '86400', CACHE_MAX_AGE_SECONDS: '1' });
+  assert.equal(boundary.maxAge, boundary.ttl);
+});
+
+test('optional fallback values use the same cache fingerprint as effective defaults', () => {
+  const defaults = readConfig({ GITHUB_TOKEN: 'test-token' });
+  const fallback = readConfig({ GITHUB_TOKEN: 'test-token', CACHE_TTL_SECONDS: '', CACHE_MAX_AGE_SECONDS: 'bad', GITHUB_TIMEOUT_MS: '0', CACHE_NAMESPACE: 'invalid/value', CACHE_VERSION: ' ' });
+  assert.equal(fallback.prefix, defaults.prefix);
 });
