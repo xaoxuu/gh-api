@@ -73,7 +73,7 @@ owner 可为用户或组织名称。组织的仓库接口正常支持；资料�
 | `CACHE_MAX_AGE_SECONDS` | `86400` | 上游故障时可返回的数据最大年龄，从上次成功校验起计算；不得小于新鲜期，最多 604800 秒 |
 | `CACHE_NAMESPACE` | Vercel 项目 ID，本地 `gh-api` | 缓存命名空间，建议每个项目使用不同值；示例文件为 `gh-api` |
 | `CACHE_VERSION` | `1` | 手动切换 Runtime Cache 版本，修改后重新部署 |
-| `CORS_ORIGINS` | `*` | 或逗号分隔的精确 Origin，例如 `https://example.com,http://localhost:5173`，不能带尾部斜杠 |
+| `CORS_ORIGINS` | `*` | 未设置或空值使用默认值；或逗号分隔的 HTTP(S) Origin，例如 `https://example.com,http://localhost:5173`。自动去除首尾空白、尾部斜杠并规范化域名大小写及默认端口；不接受路径、查询参数或账号密码 |
 | `GITHUB_TIMEOUT_MS` | `10000` | 一次回源工作（包含公开性检查和重定向）的超时，100–15000 毫秒 |
 | `PORT` | `3000` | 仅本地服务 |
 

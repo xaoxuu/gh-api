@@ -53,14 +53,14 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const ttl = integer('CACHE_TTL_SECONDS', 1800, 1, 86400);
   const maxAge = integer('CACHE_MAX_AGE_SECONDS', 86400, ttl, 604800);
   const timeout = integer('GITHUB_TIMEOUT_MS', 10000, 100, 15000);
-  const originValue = env.CORS_ORIGINS ?? '*';
+  const originValue = env.CORS_ORIGINS?.trim() || '*';
   const origins = originValue === '*' ? '*' : new Set(originValue.split(',').map(value => {
     const origin = value.trim();
     try {
       const url = new URL(origin);
-      if (!['https:', 'http:'].includes(url.protocol) || url.origin !== origin) throw new Error();
-    } catch { throw new ConfigurationError('CORS_ORIGINS', 'Use * or comma-separated HTTP(S) origins without paths or trailing slashes'); }
-    return origin;
+      if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || !/^\/*$/.test(url.pathname)) throw new Error();
+      return url.origin;
+    } catch { throw new ConfigurationError('CORS_ORIGINS', 'Use * or comma-separated HTTP(S) origins without credentials, paths, queries or fragments'); }
   }));
   const requestedNamespace = env.CACHE_NAMESPACE?.trim() ?? '';
   const namespace = /^[\w-]{1,100}$/.test(requestedNamespace)

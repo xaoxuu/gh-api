@@ -71,3 +71,18 @@ test('optional fallback values use the same cache fingerprint as effective defau
   const fallback = readConfig({ GITHUB_TOKEN: 'test-token', CACHE_TTL_SECONDS: '', CACHE_MAX_AGE_SECONDS: 'bad', GITHUB_TIMEOUT_MS: '0', CACHE_NAMESPACE: 'invalid/value', CACHE_VERSION: ' ' });
   assert.equal(fallback.prefix, defaults.prefix);
 });
+
+test('empty CORS uses default and wildcard accepts surrounding whitespace', () => {
+  for (const value of ['', '   ', ' * ']) {
+    assert.equal(readConfig({ GITHUB_TOKEN: 'test-token', CORS_ORIGINS: value }).origins, '*');
+  }
+});
+
+test('CORS normalizes trailing slashes, casing and default ports without broadening access', () => {
+  const config = readConfig({ GITHUB_TOKEN: 'test-token', CORS_ORIGINS: ' https://SITE.test:443/, https://site.test, http://localhost:5173/ ' });
+  assert.deepEqual(config.origins, new Set(['https://site.test', 'http://localhost:5173']));
+  assert.equal(config.prefix, readConfig({ GITHUB_TOKEN: 'test-token', CORS_ORIGINS: 'https://site.test,http://localhost:5173' }).prefix);
+  for (const value of ['https://site.test/path', 'https://user:secret@site.test', 'https://site.test?q=1', 'https://site.test/#fragment', 'site.test', '*,https://site.test', ',']) {
+    assert.throws(() => readConfig({ GITHUB_TOKEN: 'test-token', CORS_ORIGINS: value }), ConfigurationError);
+  }
+});
