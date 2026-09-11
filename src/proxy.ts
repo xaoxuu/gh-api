@@ -189,6 +189,53 @@ export function createProxy(config: Config, dependencies: Dependencies) {
     throw new HttpError(502, 'Too many redirects');
   }
 
+  /** Build atomically: failed pages must never replace a complete ranking. */
+  async function popularRepositories(route: Route, signal: AbortSignal): Promise<Entry> {
+    const base = route.path.replace(/popular-repos$/, 'repos');
+    const type = base.startsWith('/orgs/') ? 'public' : 'owner';
+    const repos: Array<{ id: number; full_name: string; stargazers_count: number }> = [];
+    const ids = new Set<number>();
+    let checkedAt = now();
+    let bytes = 0;
+    // Small pages stay within the existing per-response size limit.
+    for (let page = 1; page <= 100; page++) {
+      signal.throwIfAborted();
+      const source = parseRoute(`${base}?type=${type}&sort=full_name&direction=asc&per_page=30&page=${page}`, config);
+      const key = keyOf(source);
+      const cached = await read<Entry>(key);
+      let entry = cached;
+      if (!entry || age(entry) >= config.ttl) {
+        try {
+          entry = await upstream(source, cached, signal);
+          await write(key, entry, config.maxAge);
+        } catch (error) {
+          if (error instanceof HttpError && [401, 403, 404].includes(error.status)) await remove(key);
+          throw error;
+        }
+      }
+      signal.throwIfAborted();
+      checkedAt = Math.min(checkedAt, entry.checkedAt);
+      bytes += Buffer.byteLength(entry.body);
+      if (bytes > 3 * 1024 * 1024) throw new HttpError(502, 'Repository aggregate too large');
+      const data = JSON.parse(entry.body);
+      if (!Array.isArray(data) || data.some(repo => !repo || repo.private !== false ||
+          !Number.isSafeInteger(repo.id) || typeof repo.full_name !== 'string' ||
+          !Number.isSafeInteger(repo.stargazers_count) || repo.stargazers_count < 0)) {
+        throw new HttpError(502, 'Invalid repository list');
+      }
+      for (const repo of data) {
+        if (!ids.has(repo.id)) { ids.add(repo.id); repos.push(repo); }
+      }
+      // Use page length, including an extra empty page for exact multiples.
+      if (data.length < 30) {
+        repos.sort((a, b) => b.stargazers_count - a.stargazers_count ||
+          (a.full_name < b.full_name ? -1 : a.full_name > b.full_name ? 1 : 0));
+        return { body: JSON.stringify(repos), checkedAt };
+      }
+    }
+    throw new HttpError(502, 'Repository pagination limit exceeded');
+  }
+
   async function load(route: Route): Promise<Result> {
     const key = keyOf(route);
     const pending = inFlight.get(key);
@@ -201,7 +248,10 @@ export function createProxy(config: Config, dependencies: Dependencies) {
           // Another instance may have filled the regional cache while this request queued.
           const latest = await read<Entry>(key);
           if (latest && age(latest) < ttlFor(route)) return { entry: latest, state: 'HIT' };
-          const entry = await upstream(route, latest ?? cached, AbortSignal.timeout(config.timeout));
+          const signal = AbortSignal.timeout(config.timeout);
+          const entry = route.kind === 'popular-repos'
+            ? await popularRepositories(route, signal)
+            : await upstream(route, latest ?? cached, signal);
           await write(key, entry, config.maxAge);
           return { entry, state: latest || cached ? 'REVALIDATED' : 'MISS' };
         });
@@ -267,7 +317,9 @@ export function createProxy(config: Config, dependencies: Dependencies) {
         }
       }
       log({ event: 'response', cache: result.state, path: route.path });
-      return new Response(request.method === 'HEAD' || result.entry.status === 204 ? null : result.entry.body, { status: result.entry.status ?? 200, headers });
+      const body = route.kind === 'popular-repos'
+        ? JSON.stringify(JSON.parse(result.entry.body).slice(0, route.limit)) : result.entry.body;
+      return new Response(request.method === 'HEAD' || result.entry.status === 204 ? null : body, { status: result.entry.status ?? 200, headers });
     } catch (error) {
       const failure = error instanceof HttpError ? error : new HttpError(500, 'Internal proxy error');
       log({ event: 'response_error', status: failure.status });

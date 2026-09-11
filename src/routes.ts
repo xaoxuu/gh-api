@@ -1,6 +1,6 @@
 import { type Config, HttpError, ownerPattern, repoPattern } from './config.js';
 
-export interface Route { path: string; query: string; repository?: string; kind: string }
+export interface Route { path: string; query: string; repository?: string; kind: string; limit?: number }
 const pagination = ['page', 'per_page'];
 const cacheNoise = new Set(['_', 'timestamp']);
 
@@ -46,7 +46,8 @@ export function parseRoute(raw: string, config: Config): Route {
   let repository: string | undefined;
   if (root === 'users') {
     if (!config.owners.has(owner.toLowerCase())) throw new HttpError(403, 'Owner is not allowed');
-    if (parts.length === 2) kind = 'user';
+    if (parts.length === 3 && repo === 'popular-repos') { kind = 'popular-repos'; allowed = ['limit']; }
+    else if (parts.length === 2) kind = 'user';
     else if (parts.length === 3 && repo === 'repos') {
       kind = 'user-repos'; allowed = [...pagination, 'type', 'sort', 'direction'];
     } else if (parts.length === 3 && Object.hasOwn(userLists, repo)) {
@@ -54,7 +55,8 @@ export function parseRoute(raw: string, config: Config): Route {
     }
   } else if (root === 'orgs') {
     if (!config.owners.has(owner.toLowerCase())) throw new HttpError(403, 'Owner is not allowed');
-    if (parts.length === 2) kind = 'org';
+    if (parts.length === 3 && repo === 'popular-repos') { kind = 'popular-repos'; allowed = ['limit']; }
+    else if (parts.length === 2) kind = 'org';
     else if (parts.length === 3 && repo === 'repos') {
       kind = 'org-repos'; allowed = [...pagination, 'type', 'sort', 'direction'];
     }
@@ -97,6 +99,7 @@ export function parseRoute(raw: string, config: Config): Route {
         : ['created', 'updated'],
     };
     if (!(kind === 'issues' && key === 'type') && enums[key] && !enums[key].includes(value)) throw new HttpError(400, `Invalid ${key}`);
+    if (key === 'limit' && (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 100)) throw new HttpError(400, 'Invalid limit');
     if (pagination.includes(key)) {
       if (!/^\d+$/.test(value) || Number(value) < 1 || !Number.isSafeInteger(Number(value)) || Number(value) > (key === 'per_page' ? 100 : 10000)) throw new HttpError(400, `Invalid ${key}`);
     }
@@ -110,6 +113,7 @@ export function parseRoute(raw: string, config: Config): Route {
   // Only owner/repository names are case insensitive; route keywords remain strict.
   parts[1] = owner.toLowerCase();
   if (root === 'repos') parts[2] = repo.toLowerCase();
+  if (kind === 'popular-repos') return { path: `/${parts.join('/')}`, query: '', kind, limit: Number(output.get('limit') ?? 10) };
   return { path: `/${parts.join('/')}`, query: output.toString(), repository, kind };
 }
 

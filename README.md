@@ -120,6 +120,21 @@ An owner can be a user or organization name. Endpoints under `/users` and `/orgs
 
 Parameter normalization only consolidates Runtime Cache and upstream requests. Vercel CDN may still cache different original URLs separately. Normalization does not bypass public visibility checks, the allowlist, endpoint restrictions, input length limits, or rate limiting.
 
+### Popular repositories (aggregate endpoints)
+
+```text
+/users/:owner/popular-repos?limit=10
+/orgs/:owner/popular-repos?limit=10
+```
+
+Requires an owner-level allowlist entry; supports `GET`, `HEAD`, and `OPTIONS`. `limit` defaults to 10 and accepts 1–100. `_` and `timestamp` are stripped; other parameters are rejected.
+
+Returns an array retaining original repository fields, sorted by `stargazers_count` descending, then `full_name` ascending for ties. Includes owned public forks and archived repositories. User queries use `type=owner`; organization queries use `type=public`. All pages are collected and deduplicated by repository ID before taking the top N. No pagination `Link` is returned.
+
+Uses the existing cache, rate-limit, and error policies without new environment variables or scheduled jobs. Different limits for the same user or organization share the complete ranking in Runtime Cache and in-flight request merging; CDN entries remain URL-specific. Pages reuse their caches and ETags. Ranking freshness and maximum age start at the oldest page validation time, never extending the life of existing page data. Only complete collection replaces the ranking. Recoverable failures can serve a complete old ranking within the configured maximum age; ordinary `401/403/404` invalidate the ranking and return an error.
+
+Collection uses 30 items per page, at most 100 pages and 3 MiB of page bodies, with one shared `GITHUB_TIMEOUT_MS` deadline for the aggregate upstream work. Incomplete collection at a limit or timeout returns an eligible old ranking or `502`, never partial results. GitHub pagination is not a snapshot, so repository changes during collection can affect results. These endpoints do not generate static files.
+
 ## Error responses
 
 Application errors use the following JSON structure. The HTTP status matches `status`, and caching is disabled:

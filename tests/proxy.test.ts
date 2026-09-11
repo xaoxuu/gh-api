@@ -578,3 +578,118 @@ test('common CORS headers are accepted for HEAD but never forwarded upstream', a
   assert.equal(headers.get('content-type'), null);
   assert.equal(headers.get('x-requested-with'), null);
 });
+
+const popularRepo = (id: number, stars = id) => ({ id, full_name: `alice/repo-${id}`, private: false, stargazers_count: stars, description: 'original field' });
+const popularPage = Array.from({ length: 30 }, (_, i) => popularRepo(i + 1));
+const popularPath = '/users/alice/popular-repos';
+
+test('popular repositories aggregate all pages and share ranking across limits and HEAD', async () => {
+  const f = fixture([json(popularPage), json([popularRepo(31, 1000)])]);
+  const [one, two] = await Promise.all([f.handler(request(`${popularPath}?limit=1`)), f.handler(request(`${popularPath}?limit=2`))]);
+  assert.deepEqual(await one.json(), [popularRepo(31, 1000)]);
+  assert.deepEqual(await two.json(), [popularRepo(31, 1000), popularRepo(30)]);
+  assert.equal(one.headers.get('link'), null);
+  assert.equal(f.calls.length, 2);
+  assert.match(f.calls[0].url, /page=1&per_page=30&sort=full_name&type=owner/);
+  assert.match(f.calls[1].url, /page=2/);
+  const head = await f.handler(request(`${popularPath}?limit=010`, { method: 'HEAD' }));
+  assert.equal(head.headers.get('x-proxy-cache'), 'HIT');
+  assert.equal(await head.text(), '');
+  assert.equal((await (await f.handler(request(popularPath))).json()).length, 10);
+  assert.equal(f.calls.length, 2);
+});
+
+test('popular routes validate limit, require owner grants, and support public organizations', async () => {
+  for (const query of ['limit=0', 'limit=101', 'limit=-1', 'limit=1.5', 'limit=', 'limit=1&limit=2', 'page=1', 'sort=stars']) {
+    const f = fixture([]);
+    assert.equal((await f.handler(request(`${popularPath}?${query}`))).status, 400);
+    assert.equal(f.calls.length, 0);
+  }
+  const f = fixture([json([])]);
+  assert.equal((await f.handler(request('/orgs/vercel/popular-repos'))).status, 403);
+  assert.equal((await f.handler(request('/orgs/alice/popular-repos', { method: 'OPTIONS' }))).status, 204);
+  assert.equal(f.calls.length, 0);
+  assert.deepEqual(await (await f.handler(request('/orgs/alice/popular-repos'))).json(), []);
+  assert.match(f.calls[0].url, /type=public/);
+});
+
+test('popular revalidation uses per-page ETags and never stores a partial ranking', async () => {
+  const f = fixture([
+    json(popularPage, 200, { etag: '"page1"' }), json([popularRepo(31, 1000)], 200, { etag: '"page2"' }),
+    new Response(null, { status: 304 }), json({}, 503),
+    json([popularRepo(32, 2000)]),
+  ]);
+  await f.handler(request(`${popularPath}?limit=1`)); f.advance(31);
+  const stale = await f.handler(request(`${popularPath}?limit=2`));
+  assert.equal(stale.headers.get('x-proxy-cache'), 'STALE');
+  assert.equal(stale.headers.get('vercel-cdn-cache-control'), 'no-store');
+  assert.deepEqual(await stale.json(), [popularRepo(31, 1000), popularRepo(30)]);
+  assert.equal(new Headers(f.calls[2].init?.headers).get('if-none-match'), '"page1"');
+  assert.equal(new Headers(f.calls[3].init?.headers).get('if-none-match'), '"page2"');
+  const recovered = await f.handler(request(`${popularPath}?limit=1`));
+  assert.equal(recovered.headers.get('x-proxy-cache'), 'REVALIDATED');
+  assert.deepEqual(await recovered.json(), [popularRepo(32, 2000)]);
+  assert.equal(f.calls.length, 5);
+});
+
+test('popular aggregation inherits oldest page freshness instead of restarting its TTL', async () => {
+  const f = fixture([json(popularPage), json([popularRepo(31)])]);
+  await f.handler(request('/users/alice/repos?type=owner&sort=full_name&direction=asc&per_page=30&page=1'));
+  f.advance(25);
+  const response = await f.handler(request(popularPath));
+  assert.equal(response.headers.get('vercel-cdn-cache-control'), 'public, s-maxage=5, must-revalidate');
+  assert.equal(response.headers.get('x-proxy-checked-at'), new Date(1_800_000_000_000).toISOString());
+  assert.equal(f.calls.length, 2);
+});
+
+test('popular failures preserve cooldown and max age, and remove rankings on access failures', async () => {
+  const f = fixture([json([popularRepo(1)]), json({}, 429, { 'retry-after': '60' }), json({}, 503)]);
+  await f.handler(request(popularPath)); f.advance(31);
+  const stale = await f.handler(request(popularPath));
+  assert.equal(stale.headers.get('x-proxy-cache'), 'STALE');
+  assert.equal(stale.headers.get('retry-after'), '60');
+  await f.handler(request(popularPath));
+  assert.equal(f.calls.length, 2);
+  f.advance(90);
+  assert.equal((await f.handler(request(popularPath))).status, 502);
+  for (const status of [401, 403, 404]) {
+    const denied = fixture([json([popularRepo(1)]), json({}, status), json({}, 503)]);
+    await denied.handler(request(popularPath)); denied.advance(31);
+    assert.equal((await denied.handler(request(popularPath))).status, status);
+    assert.equal((await denied.handler(request(popularPath))).status, 502);
+  }
+});
+
+test('popular ranking preserves forks, deduplicates pages, handles exact multiples and rejects malformed data', async () => {
+  const f = fixture([json(popularPage), json([...popularPage]), json([])]);
+  const response = await f.handler(request(`${popularPath}?limit=100`));
+  assert.equal((await response.json()).length, 30);
+  assert.equal(f.calls.length, 3);
+  for (const repo of [{ ...popularRepo(1), private: true }, { ...popularRepo(1), stargazers_count: '5' }]) {
+    const invalid = fixture([json([repo])]);
+    assert.notEqual((await invalid.handler(request(popularPath))).status, 200);
+  }
+  const fork = { ...popularRepo(2, 1), fork: true };
+  const ties = fixture([json([fork, popularRepo(1, 1)])]);
+  assert.deepEqual(await (await ties.handler(request(popularPath))).json(), [popularRepo(1, 1), fork]);
+});
+
+test('popular collection enforces page, byte and aggregate timeout bounds without partial responses', async () => {
+  const many = fixture(Array.from({ length: 100 }, () => json(popularPage)));
+  assert.equal((await many.handler(request(popularPath))).status, 502);
+  assert.equal(many.calls.length, 100);
+  const largePage = popularPage.map(repo => ({ ...repo, description: 'x'.repeat(20_000) }));
+  const large = fixture(Array.from({ length: 6 }, () => json(largePage)));
+  assert.equal((await large.handler(request(popularPath))).status, 502);
+  assert.equal(large.calls.length, 6);
+  const slow = fixture([json(popularPage), async (_url, init) => {
+    return new Promise<Response>((_resolve, reject) => {
+      init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason), { once: true });
+    });
+  }], { GITHUB_TIMEOUT_MS: '100' });
+  // Keep Node alive while AbortSignal's unref'ed timer expires.
+  const keepAlive = setTimeout(() => {}, 1000);
+  try { assert.equal((await slow.handler(request(popularPath))).status, 502); }
+  finally { clearTimeout(keepAlive); }
+  assert.equal(slow.calls[0].init?.signal, slow.calls[1].init?.signal);
+});
